@@ -143,8 +143,31 @@ func (c *Client) GetUpdates(ctx context.Context, offset int, timeoutSec int) ([]
 	return doJSON[[]Update](ctx, c, "getUpdates", map[string]any{
 		"offset":  offset,
 		"timeout": timeoutSec,
-		"allowed_updates": []string{"message"},
+		// Empty/omitted allowed_updates means "all types except chat_member-ish".
+		// We want to *see* everything the bot is permitted to see, so omit the filter.
 	})
+}
+
+// GetUpdatesRaw is like GetUpdates but also returns each update as its raw JSON
+// so callers can log exactly what Telegram delivered (including fields this
+// client doesn't model, e.g. edited_message, message_reaction, callback_query).
+func (c *Client) GetUpdatesRaw(ctx context.Context, offset int, timeoutSec int) ([]Update, []json.RawMessage, error) {
+	raws, err := doJSON[[]json.RawMessage](ctx, c, "getUpdates", map[string]any{
+		"offset":  offset,
+		"timeout": timeoutSec,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	ups := make([]Update, 0, len(raws))
+	for _, r := range raws {
+		var u Update
+		if err := json.Unmarshal(r, &u); err != nil {
+			return nil, nil, fmt.Errorf("decode update: %w (body=%s)", err, string(r))
+		}
+		ups = append(ups, u)
+	}
+	return ups, raws, nil
 }
 
 // SendMessageParams is a subset of sendMessage params.

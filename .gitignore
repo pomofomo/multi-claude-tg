@@ -42,3 +42,4 @@ bin/trd-linux-*
 
 # OMC state
 .omc/
+.trd/

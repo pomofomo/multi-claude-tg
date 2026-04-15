@@ -158,45 +158,71 @@ func (d *Dispatcher) OnOutbound(instanceID string, frame ws.Frame) {
 		}
 		chatID := inst.ChatID
 		threadID := inst.TopicID
+		d.logger.Info("claude->tg reply",
+			"instance", shortID(instanceID),
+			"chat", chatID, "thread", threadID,
+			"reply_to", frame.ReplyTo,
+			"text_len", len(frame.Text), "text", preview(frame.Text),
+			"files", len(frame.Files),
+		)
 		if frame.Text != "" {
-			_, err := d.tg.SendMessage(ctx, telegram.SendMessageParams{
+			sent, err := d.tg.SendMessage(ctx, telegram.SendMessageParams{
 				ChatID:           chatID,
 				MessageThreadID:  threadID,
 				Text:             frame.Text,
 				ReplyToMessageID: frame.ReplyTo,
 			})
 			if err != nil {
-				d.logger.Warn("sendMessage failed", "err", err)
+				d.logger.Warn("tg sendMessage failed", "instance", shortID(instanceID), "err", err)
+			} else {
+				d.logger.Info("tg sendMessage ok", "instance", shortID(instanceID), "msg_id", sent.MessageID)
 			}
 		}
 		for _, path := range frame.Files {
 			if _, err := d.tg.SendDocument(ctx, chatID, threadID, path, ""); err != nil {
-				d.logger.Warn("sendDocument failed", "path", path, "err", err)
+				d.logger.Warn("tg sendDocument failed", "instance", shortID(instanceID), "path", path, "err", err)
+			} else {
+				d.logger.Info("tg sendDocument ok", "instance", shortID(instanceID), "path", path)
 			}
 		}
 	case "react":
+		d.logger.Info("claude->tg react",
+			"instance", shortID(instanceID),
+			"chat", frame.ChatID, "msg_id", frame.MessageID, "emoji", frame.Emoji,
+		)
 		if err := d.tg.SetReaction(ctx, frame.ChatID, frame.MessageID, frame.Emoji); err != nil {
-			d.logger.Warn("setReaction failed", "err", err)
+			d.logger.Warn("tg setReaction failed", "instance", shortID(instanceID), "err", err)
 		}
 	case "edit":
+		d.logger.Info("claude->tg edit",
+			"instance", shortID(instanceID),
+			"chat", frame.ChatID, "msg_id", frame.MessageID,
+			"text_len", len(frame.Text), "text", preview(frame.Text),
+		)
 		if err := d.tg.EditMessageText(ctx, telegram.EditMessageTextParams{
 			ChatID:    frame.ChatID,
 			MessageID: frame.MessageID,
 			Text:      frame.Text,
 		}); err != nil {
-			d.logger.Warn("editMessageText failed", "err", err)
+			d.logger.Warn("tg editMessageText failed", "instance", shortID(instanceID), "err", err)
 		}
 	case "download":
+		d.logger.Info("claude->tg download",
+			"instance", shortID(instanceID), "file_id", frame.FileID, "req_id", frame.ReqID,
+		)
 		path, err := d.tg.DownloadFile(ctx, frame.FileID, d.opts.AttachDir)
 		resp := ws.Frame{Type: "download_result", ReqID: frame.ReqID, Path: path}
 		if err != nil {
 			resp.Err = err.Error()
+			d.logger.Warn("tg downloadFile failed", "instance", shortID(instanceID), "err", err)
+		} else {
+			d.logger.Info("tg downloadFile ok", "instance", shortID(instanceID), "path", path)
 		}
 		d.sendTo(instanceID, resp)
 	case "hello":
-		// Informational.
+		d.logger.Info("channel hello", "instance", shortID(instanceID), "claims", shortID(frame.InstanceID))
 	default:
-		d.logger.Warn("unknown frame type", "type", frame.Type)
+		d.logger.Warn("unknown frame type", "instance", shortID(instanceID), "type", frame.Type)
 	}
 }
 
@@ -206,12 +232,21 @@ func (d *Dispatcher) sendTo(instanceID string, frame ws.Frame) {
 	live, ok := d.conns[instanceID]
 	d.mu.RUnlock()
 	if !ok {
+		d.logger.Warn("no live channel — dropping frame (claude session not connected?)",
+			"instance", shortID(instanceID), "frame_type", frame.Type,
+		)
 		return
 	}
 	select {
 	case live.inbound <- frame:
+		d.logger.Debug("frame queued to channel",
+			"instance", shortID(instanceID), "frame_type", frame.Type,
+			"queue_depth", len(live.inbound),
+		)
 	default:
-		d.logger.Warn("inbound full, dropping", "instance", instanceID)
+		d.logger.Warn("inbound channel full — dropping frame",
+			"instance", shortID(instanceID), "frame_type", frame.Type,
+		)
 	}
 }
 
@@ -252,7 +287,7 @@ func (d *Dispatcher) pollLoop(ctx context.Context) error {
 			return nil
 		default:
 		}
-		updates, err := d.tg.GetUpdates(ctx, offset, 30)
+		updates, raws, err := d.tg.GetUpdatesRaw(ctx, offset, 30)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -261,10 +296,14 @@ func (d *Dispatcher) pollLoop(ctx context.Context) error {
 			time.Sleep(3 * time.Second)
 			continue
 		}
-		for _, u := range updates {
+		for i, u := range updates {
 			if u.UpdateID >= offset {
 				offset = u.UpdateID + 1
 			}
+			// Log the exact payload Telegram delivered, so we can tell the
+			// difference between "bot never got it" (privacy mode) and "we
+			// parsed it but ignored it" (wrong update type / filter).
+			d.logger.Info("tg raw update", "update_id", u.UpdateID, "raw", string(raws[i]))
 			if u.Message != nil {
 				d.handleMessage(ctx, u.Message)
 			}
@@ -273,14 +312,31 @@ func (d *Dispatcher) pollLoop(ctx context.Context) error {
 }
 
 func (d *Dispatcher) handleMessage(ctx context.Context, m *telegram.Message) {
+	user := ""
+	if m.From != nil {
+		user = m.From.Username
+		if user == "" {
+			user = m.From.FirstName
+		}
+	}
+	rawText := m.Text
+	if rawText == "" {
+		rawText = m.Caption
+	}
+	hasDoc := m.Document != nil
+	nPhotos := len(m.Photo)
+	d.logger.Info("tg recv",
+		"chat", m.Chat.ID, "chat_type", m.Chat.Type, "is_forum", m.Chat.IsForum,
+		"thread", m.MessageThreadID, "msg_id", m.MessageID,
+		"from", user, "text_len", len(rawText), "text", preview(rawText),
+		"has_doc", hasDoc, "photos", nPhotos,
+	)
 	if m.Chat.Type != "supergroup" || !m.Chat.IsForum {
+		d.logger.Info("tg recv rejected: not forum supergroup", "chat", m.Chat.ID, "chat_type", m.Chat.Type)
 		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "TRD requires a forum supergroup (topics enabled). This chat is "+m.Chat.Type+".")
 		return
 	}
-	text := strings.TrimSpace(m.Text)
-	if text == "" {
-		text = strings.TrimSpace(m.Caption)
-	}
+	text := strings.TrimSpace(rawText)
 
 	// Strip bot mentions like "@mybot" from slash commands: "/start@mybot foo" -> "/start foo"
 	if strings.HasPrefix(text, "/") {
@@ -457,12 +513,21 @@ func (d *Dispatcher) cmdForget(ctx context.Context, m *telegram.Message) {
 
 // routeToInstance forwards a non-command message to the bound instance's channel plugin.
 func (d *Dispatcher) routeToInstance(ctx context.Context, m *telegram.Message, text string) {
-	inst, _ := d.store.ByTopic(m.Chat.ID, m.MessageThreadID)
+	inst, err := d.store.ByTopic(m.Chat.ID, m.MessageThreadID)
+	if err != nil {
+		d.logger.Warn("route: ByTopic lookup failed",
+			"chat", m.Chat.ID, "thread", m.MessageThreadID, "err", err)
+		return
+	}
 	if inst == nil {
 		// Not bound — silently ignore so the bot doesn't spam every chat it's in.
+		d.logger.Debug("route: no instance bound to topic — ignoring",
+			"chat", m.Chat.ID, "thread", m.MessageThreadID)
 		return
 	}
 	if inst.State != storage.StateRunning {
+		d.logger.Info("route: instance not running",
+			"instance", shortID(inst.InstanceID), "state", inst.State)
 		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "instance state is "+string(inst.State)+"; use /restart")
 		return
 	}
@@ -490,6 +555,16 @@ func (d *Dispatcher) routeToInstance(ctx context.Context, m *telegram.Message, t
 		ph := m.Photo[len(m.Photo)-1]
 		frame.AttachmentFileID = ph.FileID
 	}
+	d.mu.RLock()
+	_, connected := d.conns[inst.InstanceID]
+	d.mu.RUnlock()
+	d.logger.Info("tg->claude forward",
+		"instance", shortID(inst.InstanceID),
+		"chat", frame.ChatID, "thread", frame.ThreadID, "msg_id", frame.MessageID,
+		"from", user, "text_len", len(text), "text", preview(text),
+		"attach", frame.AttachmentFileID != "",
+		"channel_connected", connected,
+	)
 	d.sendTo(inst.InstanceID, frame)
 }
 
@@ -498,6 +573,7 @@ func (d *Dispatcher) routeToInstance(ctx context.Context, m *telegram.Message, t
 func (d *Dispatcher) launchTmux(inst storage.Instance) error {
 	name := tmuxmgr.SessionName(inst.InstanceID)
 	if tmuxmgr.HasSession(name) {
+		d.logger.Info("launchTmux: session already exists", "instance", shortID(inst.InstanceID), "session", name)
 		return nil
 	}
 	cfgPath := filepath.Join(inst.RepoPath, ".trd", "config.json")
@@ -505,9 +581,41 @@ func (d *Dispatcher) launchTmux(inst storage.Instance) error {
 		"TRD_CONFIG=" + cfgPath,
 		"TRD_INSTANCE_ID=" + inst.InstanceID,
 	}
+
+	// Claude's `--dangerously-load-development-channels` shows an interactive
+	// "are you sure?" prompt. We auto-dismiss it by sending the keystrokes a
+	// few seconds after session creation. Override via env if the default
+	// doesn't match the current Claude build's prompt.
+	delay := firstNonEmpty(os.Getenv("TRD_CLAUDE_CONFIRM_DELAY"), "3")
+	keys := firstNonEmpty(os.Getenv("TRD_CLAUDE_CONFIRM_KEYS"), "Enter")
+	claudeBin := firstNonEmpty(os.Getenv("TRD_CLAUDE_BIN"), "claude")
+	claudeArgs := firstNonEmpty(os.Getenv("TRD_CLAUDE_ARGS"),
+		"--dangerously-skip-permissions --dangerously-load-development-channels server:trd-channel")
+
 	// The channel plugin is discovered via the repo's .mcp.json we wrote at clone time.
-	cmd := "claude --dangerously-skip-permissions --dangerously-load-development-channels server:trd-channel"
+	// Background a confirm-sender that runs inside the same tmux server; if
+	// keys is empty, skip entirely.
+	var cmd string
+	if keys == "" {
+		cmd = fmt.Sprintf("%s %s", claudeBin, claudeArgs)
+	} else {
+		cmd = fmt.Sprintf("(sleep %s; tmux send-keys -t %s %s) & exec %s %s",
+			delay, name, keys, claudeBin, claudeArgs)
+	}
+	d.logger.Info("launchTmux",
+		"instance", shortID(inst.InstanceID), "session", name, "cwd", inst.RepoPath,
+		"confirm_delay", delay, "confirm_keys", keys,
+	)
 	return tmuxmgr.NewSession(name, inst.RepoPath, cmd, env)
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func (d *Dispatcher) resumeInstances() error {
@@ -612,6 +720,26 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…(truncated)"
+}
+
+// shortID returns the first 8 chars of an instance ID for compact log output.
+func shortID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}
+
+// preview returns a single-line, length-capped sample of s suitable for logs.
+func preview(s string) string {
+	const max = 200
+	// Collapse newlines so log records stay on one line.
+	s = strings.ReplaceAll(s, "\n", "\\n")
+	s = strings.ReplaceAll(s, "\r", "")
+	if len(s) > max {
+		return s[:max] + "…"
+	}
+	return s
 }
 
 // writeMCPConfig drops a .mcp.json into the repo so Claude finds the channel plugin.
