@@ -66,7 +66,13 @@ try {
   process.exit(2);
 }
 
-const NOTIFY_METHOD = process.env.TRD_NOTIFY_METHOD ?? "claude/channel";
+// Claude Code routes these notifications to the active session as
+// <channel source="..." ...> context tags, but only if the server declares
+// the `claude/channel` experimental capability AND publishes under the
+// fully-qualified MCP method name. See claude-plugins-official/telegram
+// server.ts for the reference implementation.
+const NOTIFY_METHOD =
+  process.env.TRD_NOTIFY_METHOD ?? "notifications/claude/channel";
 const DISPATCHER = `ws://127.0.0.1:${cfg.dispatcher_port}/channel?secret=${encodeURIComponent(cfg.secret)}`;
 
 let ws: WebSocket | null = null;
@@ -75,7 +81,19 @@ const pendingDownloads = new Map<string, (f: DownloadResultFrame) => void>();
 
 const server = new Server(
   { name: "trd-channel", version: "0.1.0" },
-  { capabilities: { tools: {} } },
+  {
+    capabilities: {
+      tools: {},
+      experimental: { "claude/channel": {} },
+    },
+    instructions: [
+      "Messages from a Telegram topic arrive as claude/channel notifications.",
+      "Each notification has `content` (the message text) and `meta` fields: chat_id, message_id, thread_id, user, ts, and optional attachment_file_id/attachment_name.",
+      "To respond, call the reply tool and pass chat_id back. Omit reply_to for normal replies; only set it to quote a specific earlier message_id.",
+      "To fetch an attachment, call download_attachment with attachment_file_id, then Read the returned path.",
+      "Use react for emoji reactions, edit_message for in-progress updates (edits don't push-notify — send a fresh reply when a long task finishes).",
+    ].join("\n"),
+  },
 );
 
 function connect(): void {
@@ -125,18 +143,27 @@ function wsSend(obj: object): void {
 function onFrame(frame: AnyInbound): void {
   if (frame.type === "message") {
     const m = frame as InboundFrame;
+    const tsIso = m.ts
+      ? new Date(m.ts * 1000).toISOString()
+      : new Date().toISOString();
     void server.notification({
       method: NOTIFY_METHOD,
       params: {
-        source: "telegram",
-        chat_id: m.chat_id,
-        message_id: m.message_id,
-        thread_id: m.thread_id,
-        user: m.user ?? "",
-        ts: m.ts ?? 0,
-        text: m.text ?? "",
-        attachment_file_id: m.attachment_file_id ?? "",
-        attachment_name: m.attachment_name ?? "",
+        content: m.text ?? "",
+        meta: {
+          source: "telegram",
+          chat_id: m.chat_id,
+          message_id: String(m.message_id),
+          thread_id: String(m.thread_id),
+          user: m.user ?? "",
+          ts: tsIso,
+          ...(m.attachment_file_id
+            ? { attachment_file_id: m.attachment_file_id }
+            : {}),
+          ...(m.attachment_name
+            ? { attachment_name: m.attachment_name }
+            : {}),
+        },
       },
     });
     return;
