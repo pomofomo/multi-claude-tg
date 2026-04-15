@@ -1,0 +1,292 @@
+// Package telegram is a minimal Bot API client built on net/http.
+// Only the methods TRD needs are implemented.
+package telegram
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"time"
+)
+
+const apiBase = "https://api.telegram.org"
+
+// Client is a Bot API client.
+type Client struct {
+	token string
+	http  *http.Client
+}
+
+// New builds a Client. The token should be "123:ABC..." from @BotFather.
+func New(token string) *Client {
+	return &Client{
+		token: token,
+		http:  &http.Client{Timeout: 65 * time.Second}, // long-poll uses 30s, allow slack
+	}
+}
+
+// Update is a subset of the Bot API Update object.
+type Update struct {
+	UpdateID int      `json:"update_id"`
+	Message  *Message `json:"message,omitempty"`
+}
+
+// Message is a subset of the Bot API Message object.
+type Message struct {
+	MessageID       int       `json:"message_id"`
+	MessageThreadID int       `json:"message_thread_id,omitempty"`
+	From            *User     `json:"from,omitempty"`
+	Chat            Chat      `json:"chat"`
+	Date            int64     `json:"date"`
+	Text            string    `json:"text,omitempty"`
+	Caption         string    `json:"caption,omitempty"`
+	Photo           []PhotoSize `json:"photo,omitempty"`
+	Document        *Document `json:"document,omitempty"`
+	IsTopicMessage  bool      `json:"is_topic_message,omitempty"`
+}
+
+// User is a subset of the Bot API User object.
+type User struct {
+	ID        int64  `json:"id"`
+	IsBot     bool   `json:"is_bot"`
+	Username  string `json:"username,omitempty"`
+	FirstName string `json:"first_name,omitempty"`
+}
+
+// Chat is a subset of the Bot API Chat object.
+type Chat struct {
+	ID        int64  `json:"id"`
+	Type      string `json:"type"` // "supergroup", "group", "private", etc.
+	Title     string `json:"title,omitempty"`
+	IsForum   bool   `json:"is_forum,omitempty"`
+}
+
+// PhotoSize identifies one rendition of a photo.
+type PhotoSize struct {
+	FileID   string `json:"file_id"`
+	FileSize int    `json:"file_size,omitempty"`
+	Width    int    `json:"width"`
+	Height   int    `json:"height"`
+}
+
+// Document is a generic file attachment.
+type Document struct {
+	FileID   string `json:"file_id"`
+	FileName string `json:"file_name,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
+	FileSize int    `json:"file_size,omitempty"`
+}
+
+type apiResp[T any] struct {
+	OK          bool   `json:"ok"`
+	Result      T      `json:"result,omitempty"`
+	Description string `json:"description,omitempty"`
+	ErrorCode   int    `json:"error_code,omitempty"`
+}
+
+func (c *Client) url(method string) string {
+	return fmt.Sprintf("%s/bot%s/%s", apiBase, c.token, method)
+}
+
+func (c *Client) filesURL(path string) string {
+	return fmt.Sprintf("%s/file/bot%s/%s", apiBase, c.token, path)
+}
+
+// doJSON posts a JSON body to method and decodes into out (which must be &apiResp[T]).
+func doJSON[T any](ctx context.Context, c *Client, method string, body any) (T, error) {
+	var zero T
+	var buf bytes.Buffer
+	if body != nil {
+		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			return zero, err
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url(method), &buf)
+	if err != nil {
+		return zero, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return zero, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return zero, err
+	}
+	var parsed apiResp[T]
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return zero, fmt.Errorf("decode %s: %w (body=%s)", method, err, string(data))
+	}
+	if !parsed.OK {
+		return zero, fmt.Errorf("telegram %s: %s (code=%d)", method, parsed.Description, parsed.ErrorCode)
+	}
+	return parsed.Result, nil
+}
+
+// GetMe verifies the token works.
+func (c *Client) GetMe(ctx context.Context) (User, error) {
+	return doJSON[User](ctx, c, "getMe", nil)
+}
+
+// GetUpdates long-polls for new updates starting at offset.
+func (c *Client) GetUpdates(ctx context.Context, offset int, timeoutSec int) ([]Update, error) {
+	return doJSON[[]Update](ctx, c, "getUpdates", map[string]any{
+		"offset":  offset,
+		"timeout": timeoutSec,
+		"allowed_updates": []string{"message"},
+	})
+}
+
+// SendMessageParams is a subset of sendMessage params.
+type SendMessageParams struct {
+	ChatID          int64  `json:"chat_id"`
+	MessageThreadID int    `json:"message_thread_id,omitempty"`
+	Text            string `json:"text"`
+	ReplyToMessageID int   `json:"reply_to_message_id,omitempty"`
+	ParseMode       string `json:"parse_mode,omitempty"`
+}
+
+// SendMessage sends a text message.
+func (c *Client) SendMessage(ctx context.Context, p SendMessageParams) (Message, error) {
+	return doJSON[Message](ctx, c, "sendMessage", p)
+}
+
+// EditMessageTextParams is a subset of editMessageText params.
+type EditMessageTextParams struct {
+	ChatID    int64  `json:"chat_id"`
+	MessageID int    `json:"message_id"`
+	Text      string `json:"text"`
+	ParseMode string `json:"parse_mode,omitempty"`
+}
+
+// EditMessageText edits an existing message.
+func (c *Client) EditMessageText(ctx context.Context, p EditMessageTextParams) error {
+	_, err := doJSON[json.RawMessage](ctx, c, "editMessageText", p)
+	return err
+}
+
+// SetReaction sets a single-emoji reaction on a message.
+func (c *Client) SetReaction(ctx context.Context, chatID int64, messageID int, emoji string) error {
+	type reactionEmoji struct {
+		Type  string `json:"type"`
+		Emoji string `json:"emoji"`
+	}
+	body := map[string]any{
+		"chat_id":    chatID,
+		"message_id": messageID,
+		"reaction":   []reactionEmoji{{Type: "emoji", Emoji: emoji}},
+	}
+	_, err := doJSON[json.RawMessage](ctx, c, "setMessageReaction", body)
+	return err
+}
+
+// SendDocument uploads a file and sends it as a document.
+func (c *Client) SendDocument(ctx context.Context, chatID int64, threadID int, path string, caption string) (Message, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return Message{}, err
+	}
+	defer f.Close()
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("chat_id", strconv.FormatInt(chatID, 10))
+	if threadID != 0 {
+		_ = mw.WriteField("message_thread_id", strconv.Itoa(threadID))
+	}
+	if caption != "" {
+		_ = mw.WriteField("caption", caption)
+	}
+	fw, err := mw.CreateFormFile("document", filepath.Base(path))
+	if err != nil {
+		return Message{}, err
+	}
+	if _, err := io.Copy(fw, f); err != nil {
+		return Message{}, err
+	}
+	if err := mw.Close(); err != nil {
+		return Message{}, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url("sendDocument"), &buf)
+	if err != nil {
+		return Message{}, err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return Message{}, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return Message{}, err
+	}
+	var parsed apiResp[Message]
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return Message{}, fmt.Errorf("decode sendDocument: %w (body=%s)", err, string(data))
+	}
+	if !parsed.OK {
+		return Message{}, fmt.Errorf("telegram sendDocument: %s", parsed.Description)
+	}
+	return parsed.Result, nil
+}
+
+// fileInfo is what getFile returns.
+type fileInfo struct {
+	FileID   string `json:"file_id"`
+	FileSize int    `json:"file_size"`
+	FilePath string `json:"file_path"`
+}
+
+// DownloadFile fetches a file by file_id and writes it to destDir, returning the full path.
+func (c *Client) DownloadFile(ctx context.Context, fileID, destDir string) (string, error) {
+	info, err := doJSON[fileInfo](ctx, c, "getFile", map[string]any{"file_id": fileID})
+	if err != nil {
+		return "", err
+	}
+	if info.FilePath == "" {
+		return "", errors.New("no file_path in getFile response")
+	}
+	dlURL := c.filesURL(info.FilePath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, dlURL, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("download %s: HTTP %d", dlURL, resp.StatusCode)
+	}
+	if err := os.MkdirAll(destDir, 0o700); err != nil {
+		return "", err
+	}
+	// Use the base of the telegram-provided path as local filename.
+	local := filepath.Join(destDir, filepath.Base(info.FilePath))
+	out, err := os.Create(local)
+	if err != nil {
+		return "", err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		return "", err
+	}
+	return local, nil
+}
+
+// sanity check: unused reference kept to avoid lint if url import gets removed.
+var _ = url.Parse

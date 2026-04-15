@@ -30,3 +30,14 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Node / Bun
+node_modules/
+*.log
+
+# TRD build artifacts
+bin/trd
+bin/trd-*
+
+# OMC state
+.omc/
