@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -558,7 +559,7 @@ func (d *Dispatcher) checkHealth(ctx context.Context) {
 			inst.State = storage.StateFailed
 			_ = d.store.Put(inst)
 			d.sendText(ctx, inst.ChatID, inst.TopicID,
-				fmt.Sprintf("Instance failed to start after 3 attempts. Use /restart to retry."))
+				"Instance failed to start after 3 attempts. Use /restart to retry.")
 			continue
 		}
 		if err := d.launchTmux(inst); err != nil {
@@ -610,24 +611,32 @@ func truncate(s string, n int) string {
 }
 
 // writeMCPConfig drops a .mcp.json into the repo so Claude finds the channel plugin.
-// The JS channel plugin ships with the npm package; we point Claude at the installed copy.
+//
+// Resolution order:
+//  1. $TRD_CHANNEL_ENTRY set to an absolute path → `bun run <path>` (dev install)
+//  2. $TRD_CHANNEL_ENTRY set to anything else   → `bun run $TRD_CHANNEL_ENTRY`
+//  3. default                                    → `trd-channel` (npm bin on PATH)
 func writeMCPConfig(repoPath string) error {
 	mcpPath := filepath.Join(repoPath, ".mcp.json")
-	// Claude Code MCP config format: see docs.
-	// We resolve the plugin path at runtime via $TRD_CHANNEL_ENTRY (set by the dispatcher),
-	// with a fallback to the bundled path under the npm package.
 	entry := os.Getenv("TRD_CHANNEL_ENTRY")
-	if entry == "" {
-		entry = "trd-channel" // assumes the user has `trd-channel` on PATH via npm bin
+	var command string
+	var args []string
+	if entry != "" {
+		command = "bun"
+		args = []string{"run", entry}
+	} else {
+		command = "trd-channel"
+		args = []string{}
 	}
+	argsJSON, _ := json.Marshal(args)
 	content := fmt.Sprintf(`{
   "mcpServers": {
     "trd-channel": {
-      "command": "bun",
-      "args": ["run", %q]
+      "command": %q,
+      "args": %s
     }
   }
 }
-`, entry)
+`, command, string(argsJSON))
 	return os.WriteFile(mcpPath, []byte(content), 0o644)
 }

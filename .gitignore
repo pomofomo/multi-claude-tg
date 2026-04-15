@@ -35,9 +35,10 @@ go.work.sum
 node_modules/
 *.log
 
-# TRD build artifacts
+# TRD build artifacts (keep the JS shim, which is source)
 bin/trd
-bin/trd-*
+bin/trd-darwin-*
+bin/trd-linux-*
 
 # OMC state
 .omc/
