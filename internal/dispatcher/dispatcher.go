@@ -506,7 +506,7 @@ func (d *Dispatcher) launchTmux(inst storage.Instance) error {
 		"TRD_INSTANCE_ID=" + inst.InstanceID,
 	}
 	// The channel plugin is discovered via the repo's .mcp.json we wrote at clone time.
-	cmd := "claude --dangerously-load-development-channels server:trd-channel"
+	cmd := "claude --dangerously-skip-permissions --dangerously-load-development-channels server:trd-channel"
 	return tmuxmgr.NewSession(name, inst.RepoPath, cmd, env)
 }
 

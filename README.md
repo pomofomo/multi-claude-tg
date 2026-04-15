@@ -49,6 +49,7 @@ export TRD_CHANNEL_ENTRY="$PWD/channel/index.ts"
 
 # 4. Put the dispatcher on your PATH, or call it with an absolute path.
 sudo ln -s "$PWD/bin/trd" /usr/local/bin/trd   # or symlink into ~/.local/bin
+ln -s "$PWD/bin/trd" $HOME/.local/bin/trd
 ```
 
 ### Option B — Install as an npm package (once published)
