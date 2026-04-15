@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -200,6 +199,3 @@ func (s *Server) serveConn(ctx context.Context, conn *Conn, instanceID string, r
 		s.h.OnOutbound(instanceID, frame)
 	}
 }
-
-// assert to stop unused-import warnings for fmt when Frame.String is not used.
-var _ = fmt.Sprintf

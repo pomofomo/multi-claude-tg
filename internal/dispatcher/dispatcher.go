@@ -343,7 +343,11 @@ func (d *Dispatcher) cmdStart(ctx context.Context, m *telegram.Message, repoURL 
 	repoPath := filepath.Join(reposDir, instID)
 
 	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "Cloning "+repoURL+"…")
-	if out, err := exec.CommandContext(ctx, "git", "clone", repoURL, repoPath).CombinedOutput(); err != nil {
+	cloneCtx, cloneCancel := context.WithTimeout(ctx, 5*time.Minute)
+	out, err := exec.CommandContext(cloneCtx, "git", "clone", repoURL, repoPath).CombinedOutput()
+	cloneCancel()
+	if err != nil {
+		_ = os.RemoveAll(repoPath)
 		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "clone failed:\n"+truncate(string(out), 1500))
 		return
 	}

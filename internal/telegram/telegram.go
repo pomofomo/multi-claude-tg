@@ -11,7 +11,6 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -287,6 +286,3 @@ func (c *Client) DownloadFile(ctx context.Context, fileID, destDir string) (stri
 	}
 	return local, nil
 }
-
-// sanity check: unused reference kept to avoid lint if url import gets removed.
-var _ = url.Parse
