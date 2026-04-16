@@ -117,6 +117,7 @@ const server = new Server(
       "To respond, call the reply tool and pass chat_id back. Omit reply_to for normal replies; only set it to quote a specific earlier message_id.",
       "To fetch an attachment, call download_attachment with attachment_file_id, then Read the returned path.",
       "Use react for emoji reactions, edit_message for in-progress updates (edits don't push-notify — send a fresh reply when a long task finishes).",
+      "IMPORTANT: When you receive a new message, immediately react with 👍 on it (using the react tool with the message's chat_id and message_id) BEFORE you start processing it. This confirms to the sender that the message was received, especially important for voice messages which arrive after transcription delay.",
     ].join("\n"),
   },
 );
