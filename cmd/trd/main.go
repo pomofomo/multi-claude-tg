@@ -85,7 +85,7 @@ func main() {
 // restored on subsequent starts when the env var isn't set.
 var persistedEnvKeys = []string{
 	"TELEGRAM_BOT_TOKEN",
-	"TRD_WHISPER_CMD",
+	"TRD_WHISPER_MODEL_DIR",
 	"TRD_TTS_MODEL_DIR",
 	"TRD_CHANNEL_ENTRY",
 	"TRD_OPENAI_API_KEY",

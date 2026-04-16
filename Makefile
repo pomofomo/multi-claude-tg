@@ -1,4 +1,4 @@
-.PHONY: build build-all install restart setup start self-modify test tidy clean install-deps lint
+.PHONY: build build-all install install-models restart setup start self-modify test tidy clean install-deps lint
 
 GO ?= go
 
@@ -9,6 +9,18 @@ install: build
 	mkdir -p ~/.local/bin
 	rm -f ~/.local/bin/trd
 	cp bin/trd ~/.local/bin/trd
+
+# Download whisper + TTS models to ~/.trd/models/ (~200MB total).
+install-models:
+	@echo "Downloading whisper model (base.en, ~165MB)..."
+	mkdir -p ~/.trd/models/whisper
+	curl -SL https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-base.en.tar.bz2 | \
+		tar xj --strip-components=1 -C ~/.trd/models/whisper
+	@echo "Downloading TTS model (lessac-medium, ~64MB)..."
+	mkdir -p ~/.trd/models/tts
+	curl -SL https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-lessac-medium.tar.bz2 | \
+		tar xj --strip-components=1 -C ~/.trd/models/tts
+	@echo "Models installed to ~/.trd/models/"
 
 restart: install
 	@echo "Restarting trd dispatcher in tmux session 'trd'..."

@@ -1,6 +1,6 @@
-// Package media provides optional Whisper transcription and TTS synthesis.
-// Whisper transcription uses an external CLI (whisper-cpp). TTS uses
-// sherpa-onnx embedded directly in the Go binary, with OpenAI API as fallback.
+// Package media provides Whisper transcription and TTS synthesis, both
+// embedded in the Go binary via sherpa-onnx. OpenAI API is a fallback.
+// Both are optional and gracefully degrade (returning ErrNotConfigured).
 package media
 
 import (
@@ -25,62 +25,162 @@ import (
 
 var ErrNotConfigured = errors.New("not configured")
 
+// Default model locations under ~/.trd/models/.
+const (
+	DefaultWhisperModelDir = ".trd/models/whisper"
+	DefaultTTSModelDir     = ".trd/models/tts"
+)
+
 // Config holds media processing settings, all optional.
 type Config struct {
-	// WhisperCmd is a CLI command that receives an audio file path as its
-	// last argument and prints the transcript to stdout. Audio is
-	// automatically converted to 16kHz WAV via ffmpeg before invocation.
-	// Example: "whisper-cpp -m /path/to/ggml-base.bin --no-prints --no-timestamps -f"
-	WhisperCmd string
+	// WhisperModelDir is the path to a sherpa-onnx whisper model directory.
+	// Must contain: *-encoder.int8.onnx, *-decoder.int8.onnx, *-tokens.txt
+	// Defaults to ~/.trd/models/whisper/ if that directory contains model files.
+	WhisperModelDir string
 
 	// TTSModelDir is the path to a sherpa-onnx VITS piper model directory.
-	// Must contain: <name>.onnx, tokens.txt, espeak-ng-data/
-	// Example: "~/.local/share/sherpa-onnx-tts/vits-piper-en_US-lessac-medium"
+	// Must contain: *.onnx, tokens.txt, espeak-ng-data/
+	// Defaults to ~/.trd/models/tts/ if that directory contains model files.
 	TTSModelDir string
 
 	// OpenAIAPIKey enables the OpenAI API for Whisper and/or TTS when
-	// the primary backend is not configured.
+	// the embedded engines are not configured.
 	OpenAIAPIKey string
 }
 
-// ConfigFromEnv reads media config from environment variables.
+// ConfigFromEnv reads media config from environment variables, falling
+// back to default model directories under ~/.trd/models/.
 func ConfigFromEnv() Config {
-	return Config{
-		WhisperCmd:   os.Getenv("TRD_WHISPER_CMD"),
-		TTSModelDir:  os.Getenv("TRD_TTS_MODEL_DIR"),
-		OpenAIAPIKey: os.Getenv("TRD_OPENAI_API_KEY"),
+	home, _ := os.UserHomeDir()
+	cfg := Config{
+		WhisperModelDir: os.Getenv("TRD_WHISPER_MODEL_DIR"),
+		TTSModelDir:     os.Getenv("TRD_TTS_MODEL_DIR"),
+		OpenAIAPIKey:    os.Getenv("TRD_OPENAI_API_KEY"),
 	}
+	// Fall back to default directories if they contain model files.
+	if cfg.WhisperModelDir == "" && home != "" {
+		def := filepath.Join(home, DefaultWhisperModelDir)
+		if hasModelFiles(def, ".onnx") {
+			cfg.WhisperModelDir = def
+		}
+	}
+	if cfg.TTSModelDir == "" && home != "" {
+		def := filepath.Join(home, DefaultTTSModelDir)
+		if hasModelFiles(def, ".onnx") {
+			cfg.TTSModelDir = def
+		}
+	}
+	return cfg
 }
 
-// Engine wraps Config and holds a persistent sherpa-onnx TTS instance.
+func hasModelFiles(dir, ext string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ext) && !strings.HasSuffix(e.Name(), ".onnx.json") {
+			return true
+		}
+	}
+	return false
+}
+
+// Engine wraps Config and holds persistent sherpa-onnx instances.
 // Create with NewEngine; call Close when done.
 type Engine struct {
 	Config
 
-	mu  sync.Mutex
-	tts *sherpa.OfflineTts
+	whisperMu   sync.Mutex
+	whisper     *sherpa.OfflineRecognizer
+	ttsMu       sync.Mutex
+	tts         *sherpa.OfflineTts
 }
 
-// NewEngine creates a media engine. If TTSModelDir is set, initializes
-// the sherpa-onnx TTS engine (loads model into memory once).
+// NewEngine creates a media engine. Initializes sherpa-onnx engines for
+// any configured model directories.
 func NewEngine(cfg Config) (*Engine, error) {
 	e := &Engine{Config: cfg}
+	if cfg.WhisperModelDir != "" {
+		if err := e.initWhisper(); err != nil {
+			return nil, fmt.Errorf("init whisper: %w", err)
+		}
+	}
 	if cfg.TTSModelDir != "" {
 		if err := e.initTTS(); err != nil {
+			if e.whisper != nil {
+				sherpa.DeleteOfflineRecognizer(e.whisper)
+			}
 			return nil, fmt.Errorf("init TTS: %w", err)
 		}
 	}
 	return e, nil
 }
 
-func (e *Engine) initTTS() error {
-	dir := e.TTSModelDir
-
-	// Find the .onnx file in the model directory.
+func (e *Engine) initWhisper() error {
+	dir := e.WhisperModelDir
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return fmt.Errorf("read model dir %s: %w", dir, err)
+		return fmt.Errorf("read whisper model dir %s: %w", dir, err)
 	}
+
+	// Find encoder, decoder, and tokens files.
+	var encoder, decoder, tokens string
+	for _, entry := range entries {
+		name := entry.Name()
+		switch {
+		case strings.HasSuffix(name, "-encoder.int8.onnx"):
+			encoder = filepath.Join(dir, name)
+		case strings.HasSuffix(name, "-decoder.int8.onnx"):
+			decoder = filepath.Join(dir, name)
+		case strings.HasSuffix(name, "-tokens.txt"):
+			tokens = filepath.Join(dir, name)
+		}
+	}
+	// Fall back to non-int8 if int8 not found.
+	if encoder == "" || decoder == "" {
+		for _, entry := range entries {
+			name := entry.Name()
+			if encoder == "" && strings.HasSuffix(name, "-encoder.onnx") {
+				encoder = filepath.Join(dir, name)
+			}
+			if decoder == "" && strings.HasSuffix(name, "-decoder.onnx") {
+				decoder = filepath.Join(dir, name)
+			}
+		}
+	}
+	if encoder == "" || decoder == "" || tokens == "" {
+		return fmt.Errorf("whisper model dir %s missing encoder/decoder/tokens files", dir)
+	}
+
+	config := sherpa.OfflineRecognizerConfig{}
+	config.FeatConfig.SampleRate = 16000
+	config.FeatConfig.FeatureDim = 80
+	config.ModelConfig.Whisper.Encoder = encoder
+	config.ModelConfig.Whisper.Decoder = decoder
+	config.ModelConfig.Whisper.Language = ""
+	config.ModelConfig.Whisper.Task = "transcribe"
+	config.ModelConfig.Whisper.TailPaddings = -1
+	config.ModelConfig.Tokens = tokens
+	config.ModelConfig.NumThreads = 2
+	config.ModelConfig.Provider = "cpu"
+	config.ModelConfig.Debug = 0
+	config.DecodingMethod = "greedy_search"
+
+	e.whisper = sherpa.NewOfflineRecognizer(&config)
+	if e.whisper == nil {
+		return fmt.Errorf("sherpa-onnx NewOfflineRecognizer returned nil")
+	}
+	return nil
+}
+
+func (e *Engine) initTTS() error {
+	dir := e.TTSModelDir
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read TTS model dir %s: %w", dir, err)
+	}
+
 	var onnxFile string
 	for _, entry := range entries {
 		if strings.HasSuffix(entry.Name(), ".onnx") && !strings.HasSuffix(entry.Name(), ".onnx.json") {
@@ -119,17 +219,21 @@ func (e *Engine) initTTS() error {
 	return nil
 }
 
-// Close releases the sherpa-onnx TTS resources.
+// Close releases all sherpa-onnx resources.
 func (e *Engine) Close() {
+	if e.whisper != nil {
+		sherpa.DeleteOfflineRecognizer(e.whisper)
+		e.whisper = nil
+	}
 	if e.tts != nil {
 		sherpa.DeleteOfflineTts(e.tts)
 		e.tts = nil
 	}
 }
 
-// CanTranscribe reports whether Whisper transcription is available.
+// CanTranscribe reports whether whisper transcription is available.
 func (e *Engine) CanTranscribe() bool {
-	return e.WhisperCmd != "" || e.OpenAIAPIKey != ""
+	return e.whisper != nil || e.OpenAIAPIKey != ""
 }
 
 // CanSynthesize reports whether TTS synthesis is available.
@@ -139,8 +243,8 @@ func (e *Engine) CanSynthesize() bool {
 
 // Transcribe converts an audio file to text.
 func (e *Engine) Transcribe(ctx context.Context, audioPath string) (string, error) {
-	if e.WhisperCmd != "" {
-		return e.transcribeCLI(ctx, audioPath)
+	if e.whisper != nil {
+		return e.transcribeSherpa(ctx, audioPath)
 	}
 	if e.OpenAIAPIKey != "" {
 		return e.transcribeOpenAI(ctx, audioPath)
@@ -149,7 +253,6 @@ func (e *Engine) Transcribe(ctx context.Context, audioPath string) (string, erro
 }
 
 // Synthesize converts text to an OGG audio file.
-// Returns the path to the generated audio file.
 func (e *Engine) Synthesize(ctx context.Context, text, outDir string) (string, error) {
 	if e.tts != nil {
 		return e.synthesizeSherpa(ctx, text, outDir)
@@ -162,31 +265,40 @@ func (e *Engine) Synthesize(ctx context.Context, text, outDir string) (string, e
 
 // --- Whisper transcription ---
 
-func (e *Engine) transcribeCLI(ctx context.Context, audioPath string) (string, error) {
-	// whisper-cpp requires WAV input. Convert via ffmpeg if not already WAV.
-	inputPath := audioPath
+func (e *Engine) transcribeSherpa(ctx context.Context, audioPath string) (string, error) {
+	// sherpa-onnx ReadWave only accepts WAV. Convert via ffmpeg.
+	wavPath := audioPath
+	needsCleanup := false
 	if ext := strings.ToLower(filepath.Ext(audioPath)); ext != ".wav" {
-		wavPath := audioPath + ".wav"
-		ffmpeg := exec.CommandContext(ctx, "ffmpeg", "-i", audioPath, "-ar", "16000", "-ac", "1", wavPath, "-y")
+		wavPath = audioPath + ".wav"
+		ffmpeg := exec.CommandContext(ctx, "ffmpeg", "-i", audioPath,
+			"-ar", "16000", "-ac", "1", "-f", "wav", "-acodec", "pcm_s16le",
+			wavPath, "-y")
 		if ffOut, err := ffmpeg.CombinedOutput(); err != nil {
 			return "", fmt.Errorf("ffmpeg convert failed: %w\noutput: %s", err, ffOut)
 		}
-		inputPath = wavPath
-		defer os.Remove(wavPath)
+		needsCleanup = true
 	}
 
-	parts := strings.Fields(e.WhisperCmd)
-	args := append(parts[1:], inputPath)
-	cmd := exec.CommandContext(ctx, parts[0], args...)
-	out, err := cmd.Output()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return "", fmt.Errorf("whisper cmd failed: %w\nstderr: %s", err, exitErr.Stderr)
-		}
-		return "", fmt.Errorf("whisper cmd: %w", err)
+	wave := sherpa.ReadWave(wavPath)
+	if needsCleanup {
+		os.Remove(wavPath)
 	}
-	return strings.TrimSpace(string(out)), nil
+	if wave == nil {
+		return "", fmt.Errorf("failed to read WAV: %s", wavPath)
+	}
+
+	e.whisperMu.Lock()
+	defer e.whisperMu.Unlock()
+
+	stream := sherpa.NewOfflineStream(e.whisper)
+	defer sherpa.DeleteOfflineStream(stream)
+
+	stream.AcceptWaveform(wave.SampleRate, wave.Samples)
+	e.whisper.Decode(stream)
+
+	result := stream.GetResult()
+	return strings.TrimSpace(result.Text), nil
 }
 
 func (e *Engine) transcribeOpenAI(ctx context.Context, audioPath string) (string, error) {
@@ -241,9 +353,8 @@ func (e *Engine) transcribeOpenAI(ctx context.Context, audioPath string) (string
 // --- TTS synthesis ---
 
 func (e *Engine) synthesizeSherpa(_ context.Context, text, outDir string) (string, error) {
-	// sherpa-onnx is not thread-safe for concurrent Generate calls.
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.ttsMu.Lock()
+	defer e.ttsMu.Unlock()
 
 	cfg := sherpa.GenerationConfig{
 		SilenceScale: 0.2,
@@ -253,10 +364,9 @@ func (e *Engine) synthesizeSherpa(_ context.Context, text, outDir string) (strin
 
 	audio := e.tts.GenerateWithConfig(text, &cfg, nil)
 	if len(audio.Samples) == 0 {
-		return "", fmt.Errorf("sherpa-onnx produced no audio for text: %s", text[:min(len(text), 50)])
+		return "", fmt.Errorf("sherpa-onnx produced no audio")
 	}
 
-	// Save as WAV first.
 	wavPath := filepath.Join(outDir, fmt.Sprintf("tts-%d.wav", time.Now().UnixNano()))
 	if ok := audio.Save(wavPath); !ok {
 		return "", fmt.Errorf("sherpa-onnx failed to save WAV to %s", wavPath)

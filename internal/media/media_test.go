@@ -20,14 +20,6 @@ func TestEmptyEngineDefaults(t *testing.T) {
 	}
 }
 
-func TestCanTranscribeWithWhisperCmd(t *testing.T) {
-	e, _ := NewEngine(Config{WhisperCmd: "whisper-cpp"})
-	defer e.Close()
-	if !e.CanTranscribe() {
-		t.Error("should be able to transcribe with WhisperCmd set")
-	}
-}
-
 func TestCanTranscribeWithOpenAI(t *testing.T) {
 	e, _ := NewEngine(Config{OpenAIAPIKey: "sk-test"})
 	defer e.Close()

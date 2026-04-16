@@ -15,7 +15,7 @@ cd multi-claude-tg
 make install-deps         # interactive check — tells you what's missing
 ```
 
-You need: `git`, `tmux`, `bun`, `claude` (Claude Code CLI), and Go 1.22+.
+You need: `git`, `tmux`, `bun`, `claude` (Claude Code CLI), Go 1.22+, and `ffmpeg` (for voice features).
 
 ## 3. Create a Telegram bot
 
@@ -24,7 +24,13 @@ You need: `git`, `tmux`, `bun`, `claude` (Claude Code CLI), and Go 1.22+.
 3. Create a **supergroup** with **Topics** enabled.
 4. Add the bot to the group and promote to **admin**.
 
-## 4. Start TRD
+## 4. Install voice models (optional)
+
+```bash
+make install-models       # downloads whisper + TTS models (~230MB)
+```
+
+## 5. Start TRD
 
 ```bash
 make setup TELEGRAM_BOT_TOKEN=123456:ABCDEF...
@@ -34,7 +40,7 @@ This builds `trd`, installs the channel plugin, starts the dispatcher in
 a tmux session, and **saves your config to the database**. You won't need
 the token env var again.
 
-## 5. Use it
+## 6. Use it
 
 In your Telegram supergroup, create a topic and send:
 

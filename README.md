@@ -23,9 +23,8 @@ A single Go binary (`trd`) that:
 | `tmux` | process isolation for each Claude | `apt install tmux` / `brew install tmux` |
 | `bun` | runs the channel plugin (MCP server) | `curl -fsSL https://bun.sh/install \| bash` |
 | `claude` (Claude Code CLI) | the thing being talked to | `npm i -g @anthropic-ai/claude-code` |
-| Go 1.22+ *(dev only)* | build from source | [go.dev/dl](https://go.dev/dl) |
-| `whisper-cpp` *(optional)* | transcribe voice messages | build from source (see below) |
-| `ffmpeg` *(required for voice)* | audio format conversion | `apt install ffmpeg` / `brew install ffmpeg` |
+| Go 1.22+ *(dev only)* | build from source (CGo required) | [go.dev/dl](https://go.dev/dl) |
+| `ffmpeg` *(for voice features)* | audio format conversion | `apt install ffmpeg` / `brew install ffmpeg` |
 
 Run `bash scripts/install.sh` for an interactive prerequisite check — it tells you what's missing and how to install it on your platform.
 
@@ -197,54 +196,43 @@ TRD can transcribe incoming voice messages (Whisper) and send spoken replies (TT
 Both are **optional** — if not configured, voice messages are forwarded as audio
 attachments and the `send_voice` tool returns a clear error.
 
-### Installing whisper-cpp
+### Installing models
+
+Both whisper (speech-to-text) and TTS are embedded in the `trd` binary via
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) — no external CLI tools
+needed. Just download the models (~230MB total):
 
 ```bash
-# whisper-cpp — speech-to-text (fast C++ implementation, CPU-friendly)
-git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git /tmp/whisper.cpp
-cd /tmp/whisper.cpp
-cmake -B build -DWHISPER_BUILD_EXAMPLES=ON
-cmake --build build -j$(nproc)
-sudo cp build/bin/whisper-cli /usr/local/bin/whisper-cpp
-
-# Download the base model (~142MB)
-bash models/download-ggml-model.sh base
-mkdir -p ~/.local/share/whisper-cpp/models
-cp models/ggml-base.bin ~/.local/share/whisper-cpp/models/
+make install-models
 ```
 
-### TTS model (sherpa-onnx, embedded in binary)
+This downloads:
+- **Whisper base.en** (English, ~165MB) → `~/.trd/models/whisper/`
+- **VITS piper lessac-medium** (English TTS, ~64MB) → `~/.trd/models/tts/`
 
-TTS is built into the `trd` binary via [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)
-— no external process needed. Just download a VITS piper voice model:
-
-```bash
-curl -SL -O https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-lessac-medium.tar.bz2
-mkdir -p ~/.local/share/sherpa-onnx-tts
-tar xf vits-piper-en_US-lessac-medium.tar.bz2 -C ~/.local/share/sherpa-onnx-tts/
-```
-
-Then configure the dispatcher:
+Models are auto-detected at `~/.trd/models/` on startup. Override with env vars
+if you want a different location:
 
 ```bash
-export TRD_WHISPER_CMD="whisper-cpp -m $HOME/.local/share/whisper-cpp/models/ggml-base.bin --no-prints --no-timestamps -f"
-export TRD_TTS_MODEL_DIR="$HOME/.local/share/sherpa-onnx-tts/vits-piper-en_US-lessac-medium"
+export TRD_WHISPER_MODEL_DIR=/path/to/whisper/model
+export TRD_TTS_MODEL_DIR=/path/to/tts/model
 ```
 
 ### Configuration reference
 
-| Feature | Env var | Example |
+| Feature | Env var | Default |
 |---------|---------|---------|
-| **Whisper (CLI)** | `TRD_WHISPER_CMD` | `whisper-cpp -m ~/.local/share/whisper-cpp/models/ggml-base.bin --no-prints --no-timestamps -f` |
-| **TTS (embedded)** | `TRD_TTS_MODEL_DIR` | `~/.local/share/sherpa-onnx-tts/vits-piper-en_US-lessac-medium` |
-| **OpenAI API** (fallback) | `TRD_OPENAI_API_KEY` | `sk-...` — used for Whisper and/or TTS when primary not set |
+| **Whisper (embedded)** | `TRD_WHISPER_MODEL_DIR` | `~/.trd/models/whisper/` |
+| **TTS (embedded)** | `TRD_TTS_MODEL_DIR` | `~/.trd/models/tts/` |
+| **OpenAI API** (fallback) | `TRD_OPENAI_API_KEY` | — (used when models not installed) |
 
-**Whisper flow:** voice/audio message → dispatcher downloads OGG → converts to
-16kHz WAV via ffmpeg → runs whisper-cpp → sends transcript as the message text
-to Claude (original audio still attached).
+**Whisper flow:** voice/audio message → dispatcher downloads OGG → ffmpeg
+converts to 16kHz WAV → sherpa-onnx whisper transcribes in-process → sends
+transcript as the message text to Claude (original audio still attached).
 
-**TTS flow:** Claude calls `send_voice` tool with text → sherpa-onnx synthesizes
-WAV in-process → ffmpeg converts to OGG → sent as Telegram voice message.
+**TTS flow:** Claude calls `send_voice` tool with text → sherpa-onnx VITS
+synthesizes WAV in-process → ffmpeg converts to OGG → sent as Telegram voice
+message.
 
 **Smart outbound media:** when Claude attaches files in `reply`, the dispatcher
 detects the file type and uses the appropriate Telegram method:
