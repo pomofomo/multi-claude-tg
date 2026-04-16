@@ -122,7 +122,7 @@ const server = new Server(
       "## Interaction patterns",
       "1. ACKNOWLEDGE: When you receive a new message, immediately react with 👍 on it (using the react tool with the message's chat_id and message_id) BEFORE you start processing it. This confirms to the sender that the message was received, especially important for voice messages which arrive after transcription delay.",
       "2. REPLY WHEN DONE: Always send a reply message when you finish a task, summarizing what was done. The user is not watching your screen — they only see Telegram messages.",
-      "3. VOICE REPLIES: When the user sends a voice message, respond with BOTH a text reply (full details) AND a voice message (short summary or key points). Use send_voice for the audio and reply for the text. This ensures voice-message users get audio feedback while preserving full details in text.",
+      "3. VOICE REPLIES: When the user sends a voice message (identified by attachment_name ending in .ogg or .oga), respond with BOTH a text reply (full details) AND a voice message (short summary). Only send voice replies in response to voice messages — text messages get text-only replies.",
       "4. ASK QUESTIONS: If the request is ambiguous or you need clarification, stop and ask questions via reply before proceeding. Do not guess at unclear requirements.",
       "5. PARALLEL EXECUTION: When you receive a large, clear, prescriptive spec or document with well-defined tasks and no ambiguity, use ultrawork (parallel execution) to complete it faster. Trigger this by invoking /oh-my-claudecode:ultrawork if available.",
     ].join("\n"),
