@@ -118,7 +118,8 @@ Inside a topic:
 |---------|--------|
 | `/start git@github.com:me/repo.git` | Clones the repo, writes `.trd/config.json`, launches a tmux-managed `claude` bound to this topic |
 | `/stop` | Kills the tmux session. Mapping kept; `/restart` brings it back |
-| `/restart` | Relaunches tmux for the existing mapping |
+| `/restart` | Relaunches tmux, resumes previous conversation |
+| `/reset` | Relaunches tmux with a fresh conversation (clears history) |
 | `/status` | Shows tmux + channel connection state |
 | `/watch` | Captures the current tmux pane and replies with it |
 | `/forget` | Deletes the mapping (keeps cloned files on disk) |

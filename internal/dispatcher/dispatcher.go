@@ -502,6 +502,8 @@ func (d *Dispatcher) handleMessage(ctx context.Context, m *telegram.Message) {
 		d.cmdForget(ctx, m)
 	case text == "/watch":
 		d.cmdWatch(ctx, m)
+	case text == "/reset":
+		d.cmdReset(ctx, m)
 	default:
 		d.routeToInstance(ctx, m, text)
 	}
@@ -662,7 +664,26 @@ func (d *Dispatcher) cmdRestart(ctx context.Context, m *telegram.Message) {
 	inst.State = storage.StateRunning
 	inst.FailCount = 0
 	_ = d.store.Put(*inst)
-	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "restarted")
+	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "restarted (conversation resumed)")
+}
+
+func (d *Dispatcher) cmdReset(ctx context.Context, m *telegram.Message) {
+	inst, _ := d.store.ByTopic(m.Chat.ID, m.MessageThreadID)
+	if inst == nil {
+		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "no instance bound to this topic")
+		return
+	}
+	_ = tmuxmgr.KillSession(tmuxmgr.SessionName(inst.InstanceID))
+	if err := d.launchTmuxFresh(*inst); err != nil {
+		inst.State = storage.StateFailed
+		_ = d.store.Put(*inst)
+		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "reset failed: "+err.Error())
+		return
+	}
+	inst.State = storage.StateRunning
+	inst.FailCount = 0
+	_ = d.store.Put(*inst)
+	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "reset — fresh conversation started")
 }
 
 func (d *Dispatcher) cmdStatus(ctx context.Context, m *telegram.Message) {
@@ -883,6 +904,14 @@ func (d *Dispatcher) transcribeAttachment(ctx context.Context, fileID string) st
 // --- internals ---
 
 func (d *Dispatcher) launchTmux(inst storage.Instance) error {
+	return d.launchTmuxWithOpts(inst, true)
+}
+
+func (d *Dispatcher) launchTmuxFresh(inst storage.Instance) error {
+	return d.launchTmuxWithOpts(inst, false)
+}
+
+func (d *Dispatcher) launchTmuxWithOpts(inst storage.Instance, resume bool) error {
 	name := tmuxmgr.SessionName(inst.InstanceID)
 	if tmuxmgr.HasSession(name) {
 		d.logger.Info("launchTmux: session already exists", "instance", shortID(inst.InstanceID), "session", name)
@@ -897,6 +926,11 @@ func (d *Dispatcher) launchTmux(inst storage.Instance) error {
 	claudeBin := firstNonEmpty(os.Getenv("TRD_CLAUDE_BIN"), "claude")
 	claudeArgs := firstNonEmpty(os.Getenv("TRD_CLAUDE_ARGS"),
 		"--debug --dangerously-skip-permissions --dangerously-load-development-channels server:trd-channel")
+
+	// Resume the previous conversation by default. /reset starts fresh.
+	if resume {
+		claudeArgs += " --continue"
+	}
 
 	cmd := fmt.Sprintf("%s %s", claudeBin, claudeArgs)
 	d.logger.Info("launchTmux",
