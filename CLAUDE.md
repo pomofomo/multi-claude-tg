@@ -21,7 +21,7 @@ Running locally:
 ```bash
 export TELEGRAM_BOT_TOKEN=...
 ./bin/trd start         # default port 7777
-./bin/trd status | stop <prefix> | logs <prefix>
+./bin/trd status | stop <prefix> | watch <prefix>
 ```
 
 Channel plugin (Bun/MCP):
@@ -34,8 +34,8 @@ bunx tsc --noEmit       # typecheck
 ## Architecture (read these three together)
 
 1. **`cmd/trd/main.go`** — subcommand dispatch, `start` constructs `dispatcher.Dispatcher` and `Run`s it.
-2. **`internal/dispatcher/dispatcher.go`** — the hub. Owns the Telegram long-poll loop, WS server, tmux process manager, health loop, and bbolt store. Command handlers (`cmdStart`, `cmdStop`, `cmdRestart`, `cmdStatus`, `cmdForget`) route per-topic; non-command messages are forwarded to the instance's channel plugin via a buffered frame channel.
-3. **`channel/index.ts`** — the MCP server Claude Code loads as a "channel." Reads `$TRD_CONFIG` for its identity, opens a WebSocket to the dispatcher, turns inbound frames into `claude/channel` MCP notifications, exposes `reply` / `react` / `edit_message` / `download_attachment` tools that forward back over the WS.
+2. **`internal/dispatcher/dispatcher.go`** — the hub. Owns the Telegram long-poll loop, WS server, tmux process manager, health loop, and bbolt store. Command handlers (`cmdStart`, `cmdStop`, `cmdRestart`, `cmdStatus`, `cmdWatch`, `cmdForget`) route per-topic; non-command messages are forwarded to the instance's channel plugin via a buffered frame channel. User allowlist enforcement happens here (`isUserAllowed`).
+3. **`channel/index.ts`** — the MCP server Claude Code loads as a "channel." Reads `$TRD_CONFIG` for its identity, opens a WebSocket to the dispatcher, turns inbound frames into `claude/channel` MCP notifications, exposes `reply` / `react` / `edit_message` / `download_attachment` / `send_voice` tools that forward back over the WS. Behavioral instructions (acknowledge, reply-when-done, ask questions, parallel execution) are shipped in the `instructions` field.
 
 **Key invariant:** the dispatcher performs *all* real Telegram Bot API calls. The channel plugin never talks to Telegram directly — it's a thin MCP↔WS bridge. This lets instances survive restarts: the plugin has no state, the dispatcher has all of it.
 
@@ -45,13 +45,25 @@ bunx tsc --noEmit       # typecheck
 - Plugin reconnects by presenting its secret; dispatcher's `AuthSecret` looks it up. No re-registration.
 - Health loop (30s) restarts dead tmux sessions; 3 failures → `StateFailed` + notify topic.
 
+### Restart workflow
+
+The dispatcher runs in a tmux session. To rebuild and restart after code changes:
+
+```bash
+make install              # rebuild + copy to ~/.local/bin/trd
+tmux send-keys -t trd C-c  # stop the running dispatcher
+tmux send-keys -t trd 'trd start' Enter  # restart
+```
+
+**Claude instances don't need restarting.** The channel plugin reconnects automatically (exponential backoff, 500ms → 10s). The dispatcher's `resumeInstances` relaunches any tmux sessions that died while it was down.
+
 ### Storage (`internal/storage/storage.go`)
 
-bbolt with three buckets: `instances`, `by_topic` (chat_id:thread_id → instance_id), `by_secret`. `Put` transactionally cleans stale index entries if the row previously existed under a different secret/topic. Always use `Put`/`Get`/`ByTopic`/`BySecret` — don't poke buckets directly.
+bbolt with four buckets: `instances`, `by_topic` (chat_id:thread_id → instance_id), `by_secret`, `allowed_users`. `Put` transactionally cleans stale index entries if the row previously existed under a different secret/topic. Always use `Put`/`Get`/`ByTopic`/`BySecret` — don't poke buckets directly. Allowlist managed via `AddAllowedUser`/`RemoveAllowedUser`/`ListAllowedUsers`/`IsAllowedUser`.
 
 ### WebSocket wire protocol (`internal/ws/ws.go`)
 
-One JSON frame per WS message. Server→plugin types: `message`, `download_result`. Plugin→server types: `hello`, `reply`, `react`, `edit`, `download`. The `ws.Frame` struct is the union; extend it there if adding a frame type and handle it in `dispatcher.OnOutbound`.
+One JSON frame per WS message. Server→plugin types: `message`, `download_result`, `tts_result`. Plugin→server types: `hello`, `reply`, `react`, `edit`, `download`, `tts`. The `ws.Frame` struct is the union; extend it there if adding a frame type and handle it in `dispatcher.OnOutbound`.
 
 ## Conventions that matter here
 
@@ -60,7 +72,7 @@ One JSON frame per WS message. Server→plugin types: `message`, `download_resul
 - **`.trd/` is auto-gitignored** in cloned repos (`config.EnsureGitignore`). Don't remove.
 - **tmux session names** are `trd-<instance-id>`. `tmuxmgr.SessionName` is the only place that format lives.
 - **Telegram client** is a hand-rolled `net/http` wrapper (`internal/telegram`), not a third-party lib — keep it minimal (only methods TRD actually calls).
-- **Channel plugin stays thin** (~300 lines). Don't put business logic there; add it to the Go dispatcher and route via a new frame type.
+- **Channel plugin stays thin** (~470 lines). Don't put business logic there; add it to the Go dispatcher and route via a new frame type.
 
 ## Things not to break
 

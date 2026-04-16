@@ -2,7 +2,9 @@
 
 Talk to multiple [Claude Code](https://docs.claude.com/claude-code) instances from one Telegram supergroup. **Each topic = one repo.** Create a topic, paste a git URL, and you're coding.
 
-See [SPEC.md](./SPEC.md) for the full architecture, [QUESTIONS.md](./QUESTIONS.md) for MVP design decisions.
+**This project is meant to be forked and modified.** Clone it, hack on it through Telegram (yes, using TRD itself), and make it your own. PRs and issues are welcome — see [Contributing](#contributing) below.
+
+See [SPEC.md](./SPEC.md) for the full architecture, [QUESTIONS.md](./QUESTIONS.md) for MVP design decisions, and [TODO.md](./TODO.md) for the roadmap.
 
 ## What it is
 
@@ -86,12 +88,40 @@ This puts `trd` and `trd-channel` on your `$PATH`.
 
 ## Run the dispatcher
 
+Run `trd` in a dedicated tmux session so it survives SSH disconnects:
+
 ```bash
-export TELEGRAM_BOT_TOKEN=123456:ABCDEF...
-trd start                     # binds to 127.0.0.1:7777 by default
+# Start a tmux session for the dispatcher (one-time)
+tmux new-session -d -s trd
+
+# Inside the session, start the dispatcher
+tmux send-keys -t trd 'export TELEGRAM_BOT_TOKEN=123456:ABCDEF...' Enter
+tmux send-keys -t trd 'export TRD_CHANNEL_ENTRY="$PWD/channel/index.ts"' Enter
+tmux send-keys -t trd 'trd start' Enter
+
+# Attach to see logs
+tmux attach -t trd
+# Ctrl+B, D to detach without stopping
 ```
 
-Run it in a long-lived tmux session, or drop a systemd user unit (example in `examples/` in a future release).
+## Restarting after code changes
+
+When you modify TRD's source (the Go binary or channel plugin), rebuild
+and restart the dispatcher. **Claude instances keep running** — the channel
+plugin automatically reconnects to the new dispatcher (exponential backoff,
+500ms → 10s).
+
+```bash
+make install              # rebuild + copy to ~/.local/bin/trd
+
+# Restart the dispatcher (Ctrl+C in the trd tmux, then start again)
+tmux send-keys -t trd C-c
+tmux send-keys -t trd 'trd start' Enter
+```
+
+The dispatcher's `resumeInstances` relaunches any tmux sessions that died
+while it was down. Channel plugins inside running Claude instances reconnect
+automatically within seconds — no need to restart them.
 
 ## Usage from Telegram
 
@@ -240,13 +270,36 @@ make lint           # go vet
 
 ## Not (yet) implemented
 
-These are on the roadmap but deliberately out of MVP scope (see SPEC.md § Future considerations):
+These are on the roadmap but deliberately out of MVP scope (see SPEC.md § Future considerations, [TODO.md](./TODO.md) for the full list):
 
 - Web dashboard for monitoring instances
 - Branch-aware topics (git worktrees)
 - Chat history persistence across Claude restarts
 - Remote instances over SSH
-- Per-user allowlist within a supergroup
+- CI / release automation
+- Auto-download inbound photos (currently uses the two-step `download_attachment` dance)
+
+## Contributing
+
+TRD is designed to be forked and extended. The codebase is small enough to
+understand in an afternoon.
+
+**How to contribute:**
+
+1. Fork this repo and clone it.
+2. Set up TRD pointing at your fork — you can literally develop it through
+   Telegram, using TRD to manage its own repo.
+3. Make your changes, test with `make test`, and submit a PR.
+
+**Where to look:**
+
+- [TODO.md](./TODO.md) — roadmap with checked/unchecked items
+- [SPEC.md](./SPEC.md) — architecture and design rationale
+- [QUESTIONS.md](./QUESTIONS.md) — design decisions and trade-offs
+- `internal/dispatcher/dispatcher.go` — the hub (start here)
+- `channel/index.ts` — the MCP channel plugin (~470 lines)
+
+Issues and feature requests are encouraged.
 
 ## License
 
