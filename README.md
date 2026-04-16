@@ -22,6 +22,8 @@ A single Go binary (`trd`) that:
 | `bun` | runs the channel plugin (MCP server) | `curl -fsSL https://bun.sh/install \| bash` |
 | `claude` (Claude Code CLI) | the thing being talked to | `npm i -g @anthropic-ai/claude-code` |
 | Go 1.22+ *(dev only)* | build from source | [go.dev/dl](https://go.dev/dl) |
+| `whisper` *(optional)* | transcribe voice messages | `pip3 install openai-whisper` |
+| `kokoro` *(optional)* | text-to-speech replies | `pip3 install kokoro` |
 
 Run `bash scripts/install.sh` for an interactive prerequisite check — it tells you what's missing and how to install it on your platform.
 
@@ -147,6 +149,27 @@ You type in Topic:backend
 TRD can transcribe incoming voice messages (Whisper) and send spoken replies (TTS).
 Both are **optional** — if not configured, voice messages are forwarded as audio
 attachments and the `send_voice` tool returns a clear error.
+
+### Installing Whisper and Kokoro
+
+```bash
+# Whisper — speech-to-text (CPU-only; slow but works without GPU)
+pip3 install openai-whisper
+# Or for faster CPU inference:
+pip3 install faster-whisper
+
+# Kokoro — text-to-speech (lightweight, CPU-friendly)
+pip3 install kokoro
+```
+
+Then configure the dispatcher:
+
+```bash
+export TRD_WHISPER_CMD="whisper --model base --output_format txt"
+export TRD_TTS_CMD="kokoro"
+```
+
+### Configuration reference
 
 | Feature | Env var | Example |
 |---------|---------|---------|
