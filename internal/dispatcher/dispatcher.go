@@ -343,6 +343,19 @@ func (d *Dispatcher) isUserAllowed(username string) bool {
 	return d.store.IsAllowedUser(username)
 }
 
+// SaveSettings persists the current values of the given env var keys
+// into the bbolt settings bucket, so future restarts can use them as
+// fallbacks when the env vars aren't set.
+func (d *Dispatcher) SaveSettings(keys []string) {
+	for _, key := range keys {
+		if val := os.Getenv(key); val != "" {
+			if err := d.store.SetSetting(key, val); err != nil {
+				d.logger.Warn("save setting", "key", key, "err", err)
+			}
+		}
+	}
+}
+
 // AllowedUsers returns the stored allowlist.
 func (d *Dispatcher) AllowedUsers() ([]string, error) { return d.store.ListAllowedUsers() }
 

@@ -16,6 +16,7 @@ var (
 	bucketByTopic      = []byte("by_topic")
 	bucketBySecret     = []byte("by_secret")
 	bucketAllowedUsers = []byte("allowed_users")
+	bucketSettings     = []byte("settings")
 )
 
 // State is the running state of an instance.
@@ -69,7 +70,7 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketInstances, bucketByTopic, bucketBySecret, bucketAllowedUsers} {
+		for _, b := range [][]byte{bucketInstances, bucketByTopic, bucketBySecret, bucketAllowedUsers, bucketSettings} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -275,4 +276,37 @@ func (s *Store) IsAllowedUser(username string) bool {
 		return nil
 	})
 	return found
+}
+
+// --- Settings (persistent key-value config) ---
+
+// SetSetting stores a key-value setting.
+func (s *Store) SetSetting(key, value string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketSettings).Put([]byte(key), []byte(value))
+	})
+}
+
+// GetSetting retrieves a setting by key. Returns "" if not found.
+func (s *Store) GetSetting(key string) string {
+	var val string
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		if v := tx.Bucket(bucketSettings).Get([]byte(key)); v != nil {
+			val = string(v)
+		}
+		return nil
+	})
+	return val
+}
+
+// AllSettings returns all stored settings as a map.
+func (s *Store) AllSettings() (map[string]string, error) {
+	out := map[string]string{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketSettings).ForEach(func(k, v []byte) error {
+			out[string(k)] = string(v)
+			return nil
+		})
+	})
+	return out, err
 }

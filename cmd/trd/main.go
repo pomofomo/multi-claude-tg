@@ -81,7 +81,46 @@ func main() {
 	}
 }
 
+// persistedEnvKeys are the env vars that get saved to bbolt on start and
+// restored on subsequent starts when the env var isn't set.
+var persistedEnvKeys = []string{
+	"TELEGRAM_BOT_TOKEN",
+	"TRD_WHISPER_CMD",
+	"TRD_TTS_CMD",
+	"TRD_CHANNEL_ENTRY",
+	"TRD_OPENAI_API_KEY",
+	"TRD_TTS_VOICE",
+	"TRD_TTS_MODEL",
+	"TRD_ALLOWED_USERNAMES",
+}
+
+// loadSavedSettings opens the DB, and for each persisted key where the env
+// var is not set, restores it from the stored value. Returns the store so
+// the caller can save new values after startup.
+func loadSavedSettings() {
+	dbPath, err := config.StateDBPath()
+	if err != nil {
+		return
+	}
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		return
+	}
+	defer store.Close()
+	for _, key := range persistedEnvKeys {
+		if os.Getenv(key) == "" {
+			if val := store.GetSetting(key); val != "" {
+				os.Setenv(key, val)
+			}
+		}
+	}
+}
+
 func cmdStart(args []string) {
+	// Restore saved settings as env fallbacks before parsing flags.
+	_ = config.EnsureRoot()
+	loadSavedSettings()
+
 	fs := flag.NewFlagSet("start", flag.ExitOnError)
 	token := fs.String("telegram-token", os.Getenv("TELEGRAM_BOT_TOKEN"), "Telegram bot token")
 	port := fs.Int("port", envInt("TRD_PORT", 7777), "dispatcher HTTP/WS port")
@@ -103,6 +142,9 @@ func cmdStart(args []string) {
 		os.Exit(1)
 	}
 	defer d.Close()
+
+	// Persist current env vars so future restarts work without them.
+	d.SaveSettings(persistedEnvKeys)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
