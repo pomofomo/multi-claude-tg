@@ -1,9 +1,14 @@
-.PHONY: build build-all test tidy clean install-deps lint
+.PHONY: build build-all install test tidy clean install-deps lint
 
 GO ?= go
 
 build:
 	$(GO) build -o bin/trd ./cmd/trd
+
+install: build
+	mkdir -p ~/.local/bin
+	rm -f ~/.local/bin/trd
+	cp bin/trd ~/.local/bin/trd
 
 build-all:
 	bash scripts/build-binaries.sh
