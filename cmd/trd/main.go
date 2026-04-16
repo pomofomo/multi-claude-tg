@@ -86,11 +86,9 @@ func main() {
 var persistedEnvKeys = []string{
 	"TELEGRAM_BOT_TOKEN",
 	"TRD_WHISPER_CMD",
-	"TRD_TTS_CMD",
+	"TRD_TTS_MODEL_DIR",
 	"TRD_CHANNEL_ENTRY",
 	"TRD_OPENAI_API_KEY",
-	"TRD_TTS_VOICE",
-	"TRD_TTS_MODEL",
 	"TRD_ALLOWED_USERNAMES",
 }
 

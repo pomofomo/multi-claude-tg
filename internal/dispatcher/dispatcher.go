@@ -46,7 +46,7 @@ type Dispatcher struct {
 	tg     *telegram.Client
 	store  *storage.Store
 	server *ws.Server
-	media  media.Config
+	media  *media.Engine
 
 	// live WS conns keyed by instance_id.
 	mu    sync.RWMutex
@@ -105,12 +105,17 @@ func New(opts Options) (*Dispatcher, error) {
 	}
 
 	mediaCfg := media.ConfigFromEnv()
+	engine, err := media.NewEngine(mediaCfg)
+	if err != nil {
+		store.Close()
+		return nil, fmt.Errorf("init media: %w", err)
+	}
 	d := &Dispatcher{
 		opts:    opts,
 		logger:  opts.Logger,
 		tg:      telegram.New(opts.TelegramToken),
 		store:   store,
-		media:   mediaCfg,
+		media:   engine,
 		conns:   map[string]*liveConn{},
 		pending: map[string]chan ws.Frame{},
 	}
@@ -118,8 +123,11 @@ func New(opts Options) (*Dispatcher, error) {
 	return d, nil
 }
 
-// Close flushes state.
-func (d *Dispatcher) Close() error { return d.store.Close() }
+// Close flushes state and releases resources.
+func (d *Dispatcher) Close() error {
+	d.media.Close()
+	return d.store.Close()
+}
 
 // --- ws.Handler implementation ---
 

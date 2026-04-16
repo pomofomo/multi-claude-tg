@@ -3,7 +3,7 @@
 GO ?= go
 
 build:
-	$(GO) build -o bin/trd ./cmd/trd
+	CGO_ENABLED=1 $(GO) build -o bin/trd ./cmd/trd
 
 install: build
 	mkdir -p ~/.local/bin

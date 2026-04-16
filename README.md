@@ -25,12 +25,10 @@ A single Go binary (`trd`) that:
 | `claude` (Claude Code CLI) | the thing being talked to | `npm i -g @anthropic-ai/claude-code` |
 | Go 1.22+ *(dev only)* | build from source | [go.dev/dl](https://go.dev/dl) |
 | `whisper-cpp` *(optional)* | transcribe voice messages | build from source (see below) |
-| `ffmpeg` *(required for whisper)* | audio format conversion | `apt install ffmpeg` / `brew install ffmpeg` |
-| `kokoro` *(optional)* | text-to-speech replies | `pip3 install kokoro` or `uv tool install kokoro` |
+| `ffmpeg` *(required for voice)* | audio format conversion | `apt install ffmpeg` / `brew install ffmpeg` |
 
 Run `bash scripts/install.sh` for an interactive prerequisite check — it tells you what's missing and how to install it on your platform.
 
-**Note:** for kokoro with uv, you need this as a bugfix for spacy: `uv pip install pip --python $HOME$/.local/share/uv/tools/kokoro/bin/python`
 
 ## What installs where
 
@@ -199,7 +197,7 @@ TRD can transcribe incoming voice messages (Whisper) and send spoken replies (TT
 Both are **optional** — if not configured, voice messages are forwarded as audio
 attachments and the `send_voice` tool returns a clear error.
 
-### Installing whisper-cpp and Kokoro
+### Installing whisper-cpp
 
 ```bash
 # whisper-cpp — speech-to-text (fast C++ implementation, CPU-friendly)
@@ -213,16 +211,24 @@ sudo cp build/bin/whisper-cli /usr/local/bin/whisper-cpp
 bash models/download-ggml-model.sh base
 mkdir -p ~/.local/share/whisper-cpp/models
 cp models/ggml-base.bin ~/.local/share/whisper-cpp/models/
+```
 
-# Kokoro — text-to-speech (lightweight, CPU-friendly)
-pip3 install kokoro
+### TTS model (sherpa-onnx, embedded in binary)
+
+TTS is built into the `trd` binary via [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)
+— no external process needed. Just download a VITS piper voice model:
+
+```bash
+curl -SL -O https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-lessac-medium.tar.bz2
+mkdir -p ~/.local/share/sherpa-onnx-tts
+tar xf vits-piper-en_US-lessac-medium.tar.bz2 -C ~/.local/share/sherpa-onnx-tts/
 ```
 
 Then configure the dispatcher:
 
 ```bash
 export TRD_WHISPER_CMD="whisper-cpp -m $HOME/.local/share/whisper-cpp/models/ggml-base.bin --no-prints --no-timestamps -f"
-export TRD_TTS_CMD="kokoro"
+export TRD_TTS_MODEL_DIR="$HOME/.local/share/sherpa-onnx-tts/vits-piper-en_US-lessac-medium"
 ```
 
 ### Configuration reference
@@ -230,19 +236,15 @@ export TRD_TTS_CMD="kokoro"
 | Feature | Env var | Example |
 |---------|---------|---------|
 | **Whisper (CLI)** | `TRD_WHISPER_CMD` | `whisper-cpp -m ~/.local/share/whisper-cpp/models/ggml-base.bin --no-prints --no-timestamps -f` |
-| **TTS (CLI)** | `TRD_TTS_CMD` | `kokoro` (receives `-i text.txt -o out.ogg` args) |
-| **OpenAI API** (both) | `TRD_OPENAI_API_KEY` | `sk-...` — used for Whisper and/or TTS when CLI not set |
-| TTS voice | `TRD_TTS_VOICE` | `alloy` (default, OpenAI only) |
-| TTS model | `TRD_TTS_MODEL` | `tts-1` (default, OpenAI only) |
-
-CLI commands take precedence over the OpenAI API when both are set.
+| **TTS (embedded)** | `TRD_TTS_MODEL_DIR` | `~/.local/share/sherpa-onnx-tts/vits-piper-en_US-lessac-medium` |
+| **OpenAI API** (fallback) | `TRD_OPENAI_API_KEY` | `sk-...` — used for Whisper and/or TTS when primary not set |
 
 **Whisper flow:** voice/audio message → dispatcher downloads OGG → converts to
 16kHz WAV via ffmpeg → runs whisper-cpp → sends transcript as the message text
 to Claude (original audio still attached).
 
-**TTS flow:** Claude calls `send_voice` tool with text → dispatcher runs TTS →
-sends resulting OGG as a Telegram voice message in the topic.
+**TTS flow:** Claude calls `send_voice` tool with text → sherpa-onnx synthesizes
+WAV in-process → ffmpeg converts to OGG → sent as Telegram voice message.
 
 **Smart outbound media:** when Claude attaches files in `reply`, the dispatcher
 detects the file type and uses the appropriate Telegram method:
