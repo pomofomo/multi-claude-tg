@@ -310,6 +310,50 @@ func (d *Dispatcher) ListInstances() ([]byte, error) {
 	return json.Marshal(infos)
 }
 
+// isUserAllowed checks a Telegram username against the combined allowlist
+// (stored users + TRD_ALLOWED_USERNAMES env var). An empty combined list
+// means everyone is allowed (backwards compatible).
+func (d *Dispatcher) isUserAllowed(username string) bool {
+	if username == "" {
+		// No username to check — allow (Telegram users without usernames
+		// can't be allowlisted, so blocking them would be surprising).
+		return true
+	}
+	username = strings.ToLower(username)
+
+	// Check env var first.
+	if env := os.Getenv("TRD_ALLOWED_USERNAMES"); env != "" {
+		for _, u := range strings.Split(env, ",") {
+			if strings.ToLower(strings.TrimSpace(u)) == username {
+				return true
+			}
+		}
+		// Env is set — also check stored list before rejecting.
+		if d.store.IsAllowedUser(username) {
+			return true
+		}
+		return false
+	}
+
+	// No env var — check stored list. Empty list = allow all.
+	stored, _ := d.store.ListAllowedUsers()
+	if len(stored) == 0 {
+		return true
+	}
+	return d.store.IsAllowedUser(username)
+}
+
+// AllowedUsers returns the stored allowlist.
+func (d *Dispatcher) AllowedUsers() ([]string, error) { return d.store.ListAllowedUsers() }
+
+// AddAllowedUser adds a username to the stored allowlist.
+func (d *Dispatcher) AddAllowedUser(username string) error { return d.store.AddAllowedUser(username) }
+
+// RemoveAllowedUser removes a username from the stored allowlist.
+func (d *Dispatcher) RemoveAllowedUser(username string) error {
+	return d.store.RemoveAllowedUser(username)
+}
+
 // --- Telegram long-poll and command handling ---
 
 // Run starts the WS server and Telegram long-poll. Blocks until ctx is canceled.
@@ -399,6 +443,10 @@ func (d *Dispatcher) handleMessage(ctx context.Context, m *telegram.Message) {
 	if m.Chat.Type != "supergroup" || !m.Chat.IsForum {
 		d.logger.Info("tg recv rejected: not forum supergroup", "chat", m.Chat.ID, "chat_type", m.Chat.Type)
 		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "TRD requires a forum supergroup (topics enabled). This chat is "+m.Chat.Type+".")
+		return
+	}
+	if !d.isUserAllowed(user) {
+		d.logger.Info("tg recv rejected: user not in allowlist", "user", user)
 		return
 	}
 	text := strings.TrimSpace(rawText)
@@ -723,16 +771,19 @@ func (d *Dispatcher) handleEditedMessage(_ context.Context, m *telegram.Message)
 	if m.Chat.Type != "supergroup" || !m.Chat.IsForum {
 		return
 	}
-	inst, _ := d.store.ByTopic(m.Chat.ID, m.MessageThreadID)
-	if inst == nil || inst.State != storage.StateRunning {
-		return
-	}
 	user := ""
 	if m.From != nil {
 		user = m.From.Username
 		if user == "" {
 			user = m.From.FirstName
 		}
+	}
+	if !d.isUserAllowed(user) {
+		return
+	}
+	inst, _ := d.store.ByTopic(m.Chat.ID, m.MessageThreadID)
+	if inst == nil || inst.State != storage.StateRunning {
+		return
 	}
 	text := m.Text
 	if text == "" {

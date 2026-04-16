@@ -90,10 +90,10 @@ by how much each item matters to shipping a usable 0.1.
       Wire one up (`release-please` or a hand-rolled workflow).
 - [ ] **Example systemd user unit.** README promises one "in a future
       release." Add `examples/trd.service` with `systemctl --user` usage.
-- [ ] **Per-user allowlist.** SPEC defers this, but a minimal
-      `TRD_ALLOWED_USERNAMES=alice,bob` env var would harden deployments
-      where the supergroup isn't tightly controlled. Reject commands from
-      non-allowlisted `message.from.username` with a polite error.
+- [x] **Per-user allowlist.** Done: stored in bbolt, managed via
+      `trd allow/deny/allowed` CLI commands and `/api/allowed` endpoints.
+      `TRD_ALLOWED_USERNAMES` env var merged with stored list. Empty
+      list = all users allowed (backwards compatible).
 - [ ] **Document the `.mcp.json` 0644 choice.** `.trd/config.json` is
       `0600` (holds the secret); `.mcp.json` is `0644` because it's just a
       pointer. Add a note to QUESTIONS.md so reviewers don't flag it.

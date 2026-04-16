@@ -12,9 +12,10 @@ import (
 )
 
 var (
-	bucketInstances = []byte("instances")
-	bucketByTopic   = []byte("by_topic")
-	bucketBySecret  = []byte("by_secret")
+	bucketInstances    = []byte("instances")
+	bucketByTopic      = []byte("by_topic")
+	bucketBySecret     = []byte("by_secret")
+	bucketAllowedUsers = []byte("allowed_users")
 )
 
 // State is the running state of an instance.
@@ -68,7 +69,7 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketInstances, bucketByTopic, bucketBySecret} {
+		for _, b := range [][]byte{bucketInstances, bucketByTopic, bucketBySecret, bucketAllowedUsers} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -230,4 +231,48 @@ func (s *Store) All() ([]Instance, error) {
 		})
 	})
 	return out, err
+}
+
+// --- Allowed users (allowlist) ---
+
+// AddAllowedUser adds a username to the allowlist. Case-insensitive (stored lowercase).
+func (s *Store) AddAllowedUser(username string) error {
+	username = strings.ToLower(strings.TrimPrefix(username, "@"))
+	if username == "" {
+		return errors.New("username required")
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketAllowedUsers).Put([]byte(username), []byte("1"))
+	})
+}
+
+// RemoveAllowedUser removes a username from the allowlist.
+func (s *Store) RemoveAllowedUser(username string) error {
+	username = strings.ToLower(strings.TrimPrefix(username, "@"))
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketAllowedUsers).Delete([]byte(username))
+	})
+}
+
+// ListAllowedUsers returns all usernames in the allowlist.
+func (s *Store) ListAllowedUsers() ([]string, error) {
+	var out []string
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketAllowedUsers).ForEach(func(k, _ []byte) error {
+			out = append(out, string(k))
+			return nil
+		})
+	})
+	return out, err
+}
+
+// IsAllowedUser checks if a username is in the stored allowlist.
+func (s *Store) IsAllowedUser(username string) bool {
+	username = strings.ToLower(strings.TrimPrefix(username, "@"))
+	var found bool
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		found = tx.Bucket(bucketAllowedUsers).Get([]byte(username)) != nil
+		return nil
+	})
+	return found
 }

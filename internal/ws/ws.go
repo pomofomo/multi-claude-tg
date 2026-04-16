@@ -39,6 +39,12 @@ type Handler interface {
 	Unregister(instanceID string, conn *Conn)
 	// ListInstances returns JSON-encoded instance list for the CLI API.
 	ListInstances() ([]byte, error)
+	// AllowedUsers returns the stored allowlist.
+	AllowedUsers() ([]string, error)
+	// AddAllowedUser adds a username to the allowlist.
+	AddAllowedUser(username string) error
+	// RemoveAllowedUser removes a username from the allowlist.
+	RemoveAllowedUser(username string) error
 }
 
 // Frame is one JSON frame across the WS.
@@ -115,6 +121,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/api/instances", s.handleAPIInstances)
+	mux.HandleFunc("GET /api/allowed", s.handleAPIAllowedList)
+	mux.HandleFunc("POST /api/allowed/{username}", s.handleAPIAllowedAdd)
+	mux.HandleFunc("DELETE /api/allowed/{username}", s.handleAPIAllowedRemove)
 	mux.HandleFunc("/channel", s.handleChannel)
 	s.srv = &http.Server{Addr: s.addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
@@ -146,6 +155,49 @@ func (s *Server) handleAPIInstances(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(data)
+}
+
+// handleAPIAllowedList returns the allowlist as a JSON array.
+func (s *Server) handleAPIAllowedList(w http.ResponseWriter, r *http.Request) {
+	users, err := s.h.AllowedUsers()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if users == nil {
+		users = []string{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	data, _ := json.Marshal(users)
+	_, _ = w.Write(data)
+}
+
+// handleAPIAllowedAdd adds a username to the allowlist.
+func (s *Server) handleAPIAllowedAdd(w http.ResponseWriter, r *http.Request) {
+	username := r.PathValue("username")
+	if username == "" {
+		http.Error(w, "username required", http.StatusBadRequest)
+		return
+	}
+	if err := s.h.AddAllowedUser(username); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleAPIAllowedRemove removes a username from the allowlist.
+func (s *Server) handleAPIAllowedRemove(w http.ResponseWriter, r *http.Request) {
+	username := r.PathValue("username")
+	if username == "" {
+		http.Error(w, "username required", http.StatusBadRequest)
+		return
+	}
+	if err := s.h.RemoveAllowedUser(username); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleChannel validates ?secret= and upgrades to WebSocket.

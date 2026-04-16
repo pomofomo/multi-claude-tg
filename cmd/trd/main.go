@@ -30,17 +30,21 @@ Usage:
   trd start --telegram-token <token> [--port 7777]
   trd status
   trd list
-  trd stop  <name-or-prefix>
-  trd watch <name-or-prefix>
-  trd shell <name-or-prefix>
-  trd cd    <name-or-prefix>
+  trd stop    <name-or-prefix>
+  trd watch   <name-or-prefix>
+  trd shell   <name-or-prefix>
+  trd cd      <name-or-prefix>
+  trd allow   <username>
+  trd deny    <username>
+  trd allowed
 
 <name-or-prefix> matches against repo name first, then instance ID prefix.
 
 Env:
-  TELEGRAM_BOT_TOKEN     default for --telegram-token
-  TRD_PORT               default for --port (7777)
+  TELEGRAM_BOT_TOKEN      default for --telegram-token
+  TRD_PORT                default for --port (7777)
   TRD_HEALTH_INTERVAL_SEC health-loop interval (default 30)
+  TRD_ALLOWED_USERNAMES   comma-separated allowlist (merged with stored list)
 `
 
 func main() {
@@ -63,6 +67,12 @@ func main() {
 		cmdShell(args)
 	case "cd":
 		cmdCd(args)
+	case "allow":
+		cmdAllow(args)
+	case "deny":
+		cmdDeny(args)
+	case "allowed":
+		cmdAllowed(args)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
@@ -248,6 +258,75 @@ func cmdWatch(args []string) {
 		os.Exit(1)
 	}
 	_, _ = io.Copy(os.Stdout, strings.NewReader(out))
+}
+
+func cmdAllow(args []string) {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: trd allow <username>")
+		os.Exit(2)
+	}
+	username := strings.ToLower(strings.TrimPrefix(args[0], "@"))
+	port := envInt("TRD_PORT", 7777)
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/allowed/%s", port, username)
+	req, _ := http.NewRequest(http.MethodPost, url, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "dispatcher not running:", err)
+		os.Exit(1)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		fmt.Fprintf(os.Stderr, "unexpected status: %d\n", resp.StatusCode)
+		os.Exit(1)
+	}
+	fmt.Printf("allowed: %s\n", username)
+}
+
+func cmdDeny(args []string) {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: trd deny <username>")
+		os.Exit(2)
+	}
+	username := strings.ToLower(strings.TrimPrefix(args[0], "@"))
+	port := envInt("TRD_PORT", 7777)
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/allowed/%s", port, username)
+	req, _ := http.NewRequest(http.MethodDelete, url, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "dispatcher not running:", err)
+		os.Exit(1)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		fmt.Fprintf(os.Stderr, "unexpected status: %d\n", resp.StatusCode)
+		os.Exit(1)
+	}
+	fmt.Printf("denied: %s\n", username)
+}
+
+func cmdAllowed(args []string) {
+	_ = args
+	port := envInt("TRD_PORT", 7777)
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/allowed", port)
+	resp, err := http.DefaultClient.Get(url)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "dispatcher not running:", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	var users []string
+	if err := json.NewDecoder(resp.Body).Decode(&users); err != nil {
+		fmt.Fprintln(os.Stderr, "decode:", err)
+		os.Exit(1)
+	}
+	if len(users) == 0 {
+		fmt.Println("allowlist empty — all users permitted")
+		return
+	}
+	fmt.Printf("allowed users (%d):\n", len(users))
+	for _, u := range users {
+		fmt.Printf("  @%s\n", u)
+	}
 }
 
 func findInstance(query string) (*instanceInfo, error) {

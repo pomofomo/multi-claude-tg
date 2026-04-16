@@ -103,6 +103,7 @@ Inside a topic:
 | `/stop` | Kills the tmux session. Mapping kept; `/restart` brings it back |
 | `/restart` | Relaunches tmux for the existing mapping |
 | `/status` | Shows tmux + channel connection state |
+| `/watch` | Captures the current tmux pane and replies with it |
 | `/forget` | Deletes the mapping (keeps cloned files on disk) |
 
 Anything that's not a slash command gets forwarded to Claude in that topic.
@@ -114,13 +115,37 @@ Anything that's not a slash command gets forwarded to Claude in that topic.
 All commands accept a **repo name** or **instance-ID prefix** as `<name>`.
 
 ```bash
-trd list               # all instances: repo name, state, tmux, URL
+trd list               # all instances: repo name, state, tmux, channel, URL
 trd status             # alias for list
 trd shell <name>       # open $SHELL in the repo directory
 trd cd <name>          # print the repo path (use: cd $(trd cd backend))
 trd stop <name>        # kill the tmux session
-trd logs <name>        # dump the current tmux pane
+trd watch <name>       # capture the current tmux pane
 ```
+
+## User allowlist
+
+By default, anyone who can write in the supergroup can interact with trd.
+To restrict access to specific Telegram usernames:
+
+```bash
+trd allow alice        # add @alice to the allowlist
+trd allow bob          # add @bob
+trd allowed            # show current allowlist
+trd deny bob           # remove @bob
+```
+
+When the allowlist is non-empty, only listed users can send commands or
+messages. An empty allowlist means everyone is allowed (backwards compatible).
+
+You can also seed the allowlist via environment variable:
+
+```bash
+export TRD_ALLOWED_USERNAMES=alice,bob
+```
+
+The env var is merged with the stored list. The stored list persists in
+bbolt across restarts; the env var does not.
 
 ## File layout
 
