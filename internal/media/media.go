@@ -24,8 +24,9 @@ var ErrNotConfigured = errors.New("not configured")
 // Config holds media processing settings, all optional.
 type Config struct {
 	// WhisperCmd is a CLI command that receives an audio file path as its
-	// last argument and prints the transcript to stdout.
-	// Example: "whisper --model base --output_format txt"
+	// last argument and prints the transcript to stdout. Audio is
+	// automatically converted to 16kHz WAV via ffmpeg before invocation.
+	// Example: "whisper-cpp -m /path/to/ggml-base.bin --no-prints --no-timestamps -f"
 	WhisperCmd string
 
 	// TTSCmd is a CLI command for TTS synthesis.
@@ -84,8 +85,20 @@ func (c Config) Transcribe(ctx context.Context, audioPath string) (string, error
 }
 
 func (c Config) transcribeCLI(ctx context.Context, audioPath string) (string, error) {
+	// whisper-cpp requires WAV input. Convert via ffmpeg if the file isn't already WAV.
+	inputPath := audioPath
+	if ext := strings.ToLower(filepath.Ext(audioPath)); ext != ".wav" {
+		wavPath := audioPath + ".wav"
+		ffmpeg := exec.CommandContext(ctx, "ffmpeg", "-i", audioPath, "-ar", "16000", "-ac", "1", wavPath, "-y")
+		if ffOut, err := ffmpeg.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("ffmpeg convert failed: %w\noutput: %s", err, ffOut)
+		}
+		inputPath = wavPath
+		defer os.Remove(wavPath)
+	}
+
 	parts := strings.Fields(c.WhisperCmd)
-	args := append(parts[1:], audioPath)
+	args := append(parts[1:], inputPath)
 	cmd := exec.CommandContext(ctx, parts[0], args...)
 	out, err := cmd.Output()
 	if err != nil {

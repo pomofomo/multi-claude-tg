@@ -24,7 +24,8 @@ A single Go binary (`trd`) that:
 | `bun` | runs the channel plugin (MCP server) | `curl -fsSL https://bun.sh/install \| bash` |
 | `claude` (Claude Code CLI) | the thing being talked to | `npm i -g @anthropic-ai/claude-code` |
 | Go 1.22+ *(dev only)* | build from source | [go.dev/dl](https://go.dev/dl) |
-| `whisper` *(optional)* | transcribe voice messages | `pip3 install openai-whisper` or `uv tool install openai-whisper` |
+| `whisper-cpp` *(optional)* | transcribe voice messages | build from source (see below) |
+| `ffmpeg` *(required for whisper)* | audio format conversion | `apt install ffmpeg` / `brew install ffmpeg` |
 | `kokoro` *(optional)* | text-to-speech replies | `pip3 install kokoro` or `uv tool install kokoro` |
 
 Run `bash scripts/install.sh` for an interactive prerequisite check — it tells you what's missing and how to install it on your platform.
@@ -47,14 +48,14 @@ The dispatcher is a long-running process you start once. Per-repo files are crea
 
 ## Install
 
-### Option A — From source (recommended for now)
+### From source (recommended for now)
 
 ```bash
 git clone https://github.com/pomofomo/multi-claude-tg.git
 cd multi-claude-tg
 
-# 1. Build the dispatcher binary.
-make build                 # produces bin/trd
+# 1. Build the dispatcher binary. (Puts in in $HOME/.local/bin which should be in $PATH)
+make install                 # produces bin/trd
 
 # 2. Install the channel plugin's deps.
 cd channel && bun install && cd ..
@@ -64,20 +65,7 @@ cd channel && bun install && cd ..
 #    Default (npm install): resolves `trd-channel` from PATH.
 #    From source: set this env var so it uses your local checkout.
 export TRD_CHANNEL_ENTRY="$PWD/channel/index.ts"
-
-# 4. Put the dispatcher on your PATH.
-ln -s "$PWD/bin/trd" "$HOME/.local/bin/trd"
 ```
-
-### Option B — npm package (once published)
-
-```bash
-npm install -g telegram-repo-dispatcher
-# ships prebuilt Go binaries for linux/{amd64,arm64} and darwin/{amd64,arm64}
-# postinstall falls back to `go build` if no prebuilt matches your platform
-```
-
-This puts `trd` and `trd-channel` on your `$PATH`.
 
 ## Create the Telegram bot
 
@@ -114,7 +102,9 @@ plugin automatically reconnects to the new dispatcher (exponential backoff,
 ```bash
 make install              # rebuild + copy to ~/.local/bin/trd
 
-# Restart the dispatcher (Ctrl+C in the trd tmux, then start again)
+make restart
+
+# (This is what restart does internally)
 tmux send-keys -t trd C-c
 tmux send-keys -t trd 'trd start' Enter
 ```
@@ -209,13 +199,20 @@ TRD can transcribe incoming voice messages (Whisper) and send spoken replies (TT
 Both are **optional** — if not configured, voice messages are forwarded as audio
 attachments and the `send_voice` tool returns a clear error.
 
-### Installing Whisper and Kokoro
+### Installing whisper-cpp and Kokoro
 
 ```bash
-# Whisper — speech-to-text (CPU-only; slow but works without GPU)
-pip3 install openai-whisper
-# Or for faster CPU inference:
-pip3 install faster-whisper
+# whisper-cpp — speech-to-text (fast C++ implementation, CPU-friendly)
+git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git /tmp/whisper.cpp
+cd /tmp/whisper.cpp
+cmake -B build -DWHISPER_BUILD_EXAMPLES=ON
+cmake --build build -j$(nproc)
+sudo cp build/bin/whisper-cli /usr/local/bin/whisper-cpp
+
+# Download the base model (~142MB)
+bash models/download-ggml-model.sh base
+mkdir -p ~/.local/share/whisper-cpp/models
+cp models/ggml-base.bin ~/.local/share/whisper-cpp/models/
 
 # Kokoro — text-to-speech (lightweight, CPU-friendly)
 pip3 install kokoro
@@ -224,7 +221,7 @@ pip3 install kokoro
 Then configure the dispatcher:
 
 ```bash
-export TRD_WHISPER_CMD="whisper --model base --output_format txt"
+export TRD_WHISPER_CMD="whisper-cpp -m $HOME/.local/share/whisper-cpp/models/ggml-base.bin --no-prints --no-timestamps -f"
 export TRD_TTS_CMD="kokoro"
 ```
 
@@ -232,16 +229,17 @@ export TRD_TTS_CMD="kokoro"
 
 | Feature | Env var | Example |
 |---------|---------|---------|
-| **Whisper (CLI)** | `TRD_WHISPER_CMD` | `whisper --model base --output_format txt` |
-| **TTS (CLI)** | `TRD_TTS_CMD` | `kokoro` (receives text file + output path as args) |
+| **Whisper (CLI)** | `TRD_WHISPER_CMD` | `whisper-cpp -m ~/.local/share/whisper-cpp/models/ggml-base.bin --no-prints --no-timestamps -f` |
+| **TTS (CLI)** | `TRD_TTS_CMD` | `kokoro` (receives `-i text.txt -o out.ogg` args) |
 | **OpenAI API** (both) | `TRD_OPENAI_API_KEY` | `sk-...` — used for Whisper and/or TTS when CLI not set |
 | TTS voice | `TRD_TTS_VOICE` | `alloy` (default, OpenAI only) |
 | TTS model | `TRD_TTS_MODEL` | `tts-1` (default, OpenAI only) |
 
 CLI commands take precedence over the OpenAI API when both are set.
 
-**Whisper flow:** voice/audio message → dispatcher downloads OGG → runs Whisper →
-sends transcript as the message text to Claude (original audio still attached).
+**Whisper flow:** voice/audio message → dispatcher downloads OGG → converts to
+16kHz WAV via ffmpeg → runs whisper-cpp → sends transcript as the message text
+to Claude (original audio still attached).
 
 **TTS flow:** Claude calls `send_voice` tool with text → dispatcher runs TTS →
 sends resulting OGG as a Telegram voice message in the topic.
