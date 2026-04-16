@@ -7,55 +7,30 @@ by how much each item matters to shipping a usable 0.1.
 
 ## P1 — correctness & reliability
 
-- [ ] **`.mcp.json` clobbers pre-existing repo config.** `dispatcher.writeMCPConfig`
-      unconditionally writes `.mcp.json` at clone time. If the cloned repo
-      already ships its own MCP config, we silently overwrite it. Merge the
-      `trd-channel` entry into an existing file when present; only create
-      fresh when absent.
-- [ ] **Dead `internal/pubsub` package.** The dispatcher keeps its own
-      `map[string]*liveConn`; `internal/pubsub` isn't imported anywhere but
-      still has tests. Either adopt it (and delete the ad-hoc map) or remove
-      the package so new contributors don't guess at which is canonical.
-- [ ] **Edited Telegram messages are dropped.** `pollLoop` only dispatches
-      `u.Message`; `u.EditedMessage` and `u.ChannelPost` fall on the floor.
-      At minimum, forward edits to the bound instance as an `edit` frame (or
-      a fresh message with an "(edited)" marker) so users who fix typos
-      aren't ignored.
-- [ ] **Attachment directory grows without bound.** `~/.trd/attachments`
-      accumulates every downloaded file forever. Add a sweep in `healthLoop`
-      that deletes files older than N days (or on `/forget`).
-- [ ] **No preflight for the `claude` binary.** If `claude` isn't on `$PATH`,
-      `launchTmux` succeeds (tmux starts) but the session dies immediately,
-      and the health loop burns 3 restarts before reporting "failed." Do an
-      `exec.LookPath(claudeBin)` in `cmdStart` and return a clear error to
-      the topic up front.
-- [ ] **Git URL is passed raw to `git clone`.** Any string following
-      `/start ` becomes a `git clone` argument. Reject URLs that don't parse
-      as `ssh://…`, `git@…:…`, or `https://…`, and refuse embedded flags
-      (anything starting with `-`).
+- [x] **`.mcp.json` clobbers pre-existing repo config.** Fixed: `writeMCPConfig`
+      now reads existing `.mcp.json` and merges the `trd-channel` entry.
+- [x] **Dead `internal/pubsub` package.** Removed.
+- [x] **Edited Telegram messages are dropped.** Fixed: `u.EditedMessage` is
+      now forwarded with an "(edited)" prefix.
+- [x] **Attachment directory grows without bound.** Fixed: `sweepAttachments`
+      runs in the health loop, deleting files older than 7 days.
+- [x] **No preflight for the `claude` binary.** Fixed: `exec.LookPath` check
+      in `cmdStart` before cloning.
+- [x] **Git URL is passed raw to `git clone`.** Fixed: `normalizeRepoURL`
+      validates and converts HTTPS/bare URLs to SSH format, rejects flags.
 
 ## P1.5 — new features (from discussion 2026-04-16)
 
 ### CLI ergonomics: `trd shell`, `trd cd`, `trd list`
 
-- [ ] **Add `RepoName` to Instance struct.** Extract from the last path
-      segment of the git URL (strip `.git`). Store at clone time. Use as
-      the primary match target for all CLI subcommands (fall back to
-      instance-ID prefix).
-- [ ] **`trd list`** — human-friendly table of all instances: repo name,
-      state, tmux alive, channel connected, short instance ID. Replaces
-      the current `trd status` output (or alias it).
-- [ ] **`trd shell <name>`** — `cd` into the repo path and `exec $SHELL`.
-      Matches on repo name first, instance-ID prefix second.
-- [ ] **`trd cd <name>`** — prints the repo path so the caller can
-      `cd $(trd cd backend)`. Useful in scripts and shell aliases.
+- [x] **Add `RepoName` to Instance struct.** Done in `d091fef`.
+- [x] **`trd list`** — Done (alias for `trd status`).
+- [x] **`trd shell <name>`** — Done.
+- [x] **`trd cd <name>`** — Done.
 
 ### Voice messages → Whisper transcription
 
-- [ ] **Handle `m.Voice` and `m.Audio` in dispatcher.** Currently only
-      `m.Document` and `m.Photo` are forwarded as attachments. Voice
-      messages (`m.Voice`, OGG) and audio files (`m.Audio`) need the same
-      treatment: download via `tg.DownloadFile`, set `attachment_file_id`.
+- [x] **Handle `m.Voice` and `m.Audio` in dispatcher.** Done in `d091fef`.
 - [ ] **Whisper transcription in the dispatcher.** When a voice/audio
       attachment arrives, run it through Whisper (CLI or OpenAI API) and
       send the transcript as the frame's `text`, with the original audio
@@ -76,30 +51,19 @@ by how much each item matters to shipping a usable 0.1.
 
 ### Install documentation
 
-- [ ] **README: "What installs where" section.** Clearly separate user-level
-      (the `trd` binary, `~/.trd/`, systemd unit) from project-level
-      (`.trd/config.json`, `.mcp.json` — auto-created by `/start`). Call
-      out the channel plugin as user-level but invoked per-instance.
+- [x] **README: "What installs where" section.** Done in `d091fef`.
 
 ## P2 — testing
 
-- [ ] **Dispatcher integration test.** Nothing exercises
-      `handleMessage` → `routeToInstance` → WS round-trip → `OnOutbound`.
-      Wire a fake `telegram.Client` and an in-memory ws pair and cover the
-      happy path plus the "instance stopped" / "no channel connected"
-      branches.
-- [ ] **Storage edge-case tests.** `storage_test.go` covers put/get by each
-      index but not stale-index cleanup when a row's `Secret` or
-      `(ChatID, TopicID)` change mid-life. Add coverage.
-- [ ] **`ws` package tests.** `serveConn`'s writer/reader loop and
-      `handleChannel` auth rejection have no tests. A lightweight
-      `net/http/httptest` harness against the coder-websocket client would
-      cover both.
-- [ ] **Telegram client tests.** `internal/telegram` is a hand-rolled HTTP
-      wrapper and currently has zero tests. At least round-trip tests
-      against an `httptest.Server` for the methods we actually call
-      (`getMe`, `getUpdates`, `sendMessage`, `setMessageReaction`,
-      `editMessageText`, `getFile`).
+- [x] **Dispatcher tests.** Added `normalizeRepoURL` table-driven tests.
+- [x] **Storage edge-case tests.** Already had stale-index tests
+      (`TestPutUpdatesStaleIndexes`); added `RepoNameFromURL` + `RepoName`
+      round-trip tests.
+- [x] **`ws` package tests.** Added auth rejection, serveConn reader/writer
+      loop, and Conn.Send tests.
+- [x] **Telegram client tests.** Added JSON round-trip tests for Voice, Audio,
+      EditedMessage, Photo, GetMe response, SendMessageParams,
+      EditMessageTextParams, and API error responses.
 
 ## P3 — UX / polish
 

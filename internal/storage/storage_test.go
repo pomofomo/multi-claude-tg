@@ -108,6 +108,53 @@ func TestMissingReturnsNilNilError(t *testing.T) {
 	}
 }
 
+func TestRepoNameFromURL(t *testing.T) {
+	tests := []struct {
+		url  string
+		want string
+	}{
+		{"git@github.com:org/repo.git", "repo"},
+		{"git@github.com:org/repo", "repo"},
+		{"https://github.com/org/repo.git", "repo"},
+		{"https://github.com/org/repo", "repo"},
+		{"github.com/org/repo", "repo"},
+		{"git@gitlab.com:deep/nested/repo.git", "repo"},
+		{"", "unknown"},
+	}
+	for _, tt := range tests {
+		got := RepoNameFromURL(tt.url)
+		if got != tt.want {
+			t.Errorf("RepoNameFromURL(%q) = %q, want %q", tt.url, got, tt.want)
+		}
+	}
+}
+
+func TestRepoNameStoredAndRetrieved(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	inst := Instance{
+		InstanceID: "rn-1",
+		ChatID:     1,
+		Secret:     "s",
+		RepoURL:    "git@github.com:org/myrepo.git",
+		RepoName:   "myrepo",
+	}
+	if err := s.Put(inst); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get("rn-1")
+	if err != nil || got == nil {
+		t.Fatalf("Get: %v, %v", got, err)
+	}
+	if got.RepoName != "myrepo" {
+		t.Errorf("RepoName = %q, want %q", got.RepoName, "myrepo")
+	}
+}
+
 func TestAll(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := Open(filepath.Join(dir, "test.db"))

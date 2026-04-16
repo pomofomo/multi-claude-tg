@@ -35,8 +35,9 @@ func New(token string) *Client {
 
 // Update is a subset of the Bot API Update object.
 type Update struct {
-	UpdateID int      `json:"update_id"`
-	Message  *Message `json:"message,omitempty"`
+	UpdateID      int      `json:"update_id"`
+	Message       *Message `json:"message,omitempty"`
+	EditedMessage *Message `json:"edited_message,omitempty"`
 }
 
 // Message is a subset of the Bot API Message object.

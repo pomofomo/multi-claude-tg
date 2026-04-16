@@ -307,6 +307,9 @@ func (d *Dispatcher) pollLoop(ctx context.Context) error {
 			if u.Message != nil {
 				d.handleMessage(ctx, u.Message)
 			}
+			if u.EditedMessage != nil {
+				d.handleEditedMessage(ctx, u.EditedMessage)
+			}
 		}
 	}
 }
@@ -359,7 +362,7 @@ func (d *Dispatcher) handleMessage(ctx context.Context, m *telegram.Message) {
 		arg := strings.TrimSpace(strings.TrimPrefix(text, "/start"))
 		d.cmdStart(ctx, m, arg)
 	case text == "/start":
-		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "Usage: /start <ssh-git-url>")
+		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "Usage: /start <git-url>")
 	case text == "/stop":
 		d.cmdStop(ctx, m)
 	case text == "/restart":
@@ -377,9 +380,15 @@ func (d *Dispatcher) handleMessage(ctx context.Context, m *telegram.Message) {
 
 func (d *Dispatcher) cmdStart(ctx context.Context, m *telegram.Message, repoURL string) {
 	if repoURL == "" {
-		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "Usage: /start <ssh-git-url>")
+		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "Usage: /start <git-url>\nAccepted formats:\n  git@github.com:org/repo.git\n  https://github.com/org/repo\n  github.com/org/repo")
 		return
 	}
+	normalized, err := normalizeRepoURL(repoURL)
+	if err != nil {
+		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "Invalid repo URL: "+err.Error())
+		return
+	}
+	repoURL = normalized
 	existing, err := d.store.ByTopic(m.Chat.ID, m.MessageThreadID)
 	if err != nil {
 		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "internal error: "+err.Error())
@@ -397,6 +406,13 @@ func (d *Dispatcher) cmdStart(ctx context.Context, m *telegram.Message, repoURL 
 		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "failed to generate secret: "+err.Error())
 		return
 	}
+	claudeBin := firstNonEmpty(os.Getenv("TRD_CLAUDE_BIN"), "claude")
+	if _, err := exec.LookPath(claudeBin); err != nil {
+		d.sendText(ctx, m.Chat.ID, m.MessageThreadID,
+			fmt.Sprintf("%q not found on PATH. Install Claude Code first.", claudeBin))
+		return
+	}
+
 	reposDir, _ := config.ReposDir()
 	repoPath := filepath.Join(reposDir, instID)
 
@@ -576,6 +592,42 @@ func (d *Dispatcher) routeToInstance(ctx context.Context, m *telegram.Message, t
 	d.sendTo(inst.InstanceID, frame)
 }
 
+// handleEditedMessage forwards an edited Telegram message to the bound instance
+// so the user's corrections aren't silently lost.
+func (d *Dispatcher) handleEditedMessage(_ context.Context, m *telegram.Message) {
+	if m.Chat.Type != "supergroup" || !m.Chat.IsForum {
+		return
+	}
+	inst, _ := d.store.ByTopic(m.Chat.ID, m.MessageThreadID)
+	if inst == nil || inst.State != storage.StateRunning {
+		return
+	}
+	user := ""
+	if m.From != nil {
+		user = m.From.Username
+		if user == "" {
+			user = m.From.FirstName
+		}
+	}
+	text := m.Text
+	if text == "" {
+		text = m.Caption
+	}
+	d.logger.Info("tg edited->claude",
+		"instance", shortID(inst.InstanceID), "msg_id", m.MessageID, "from", user,
+	)
+	frame := ws.Frame{
+		Type:      "message",
+		ChatID:    m.Chat.ID,
+		MessageID: m.MessageID,
+		ThreadID:  m.MessageThreadID,
+		User:      user,
+		Text:      fmt.Sprintf("(edited) %s", text),
+		TS:        m.Date,
+	}
+	d.sendTo(inst.InstanceID, frame)
+}
+
 // --- internals ---
 
 func (d *Dispatcher) launchTmux(inst storage.Instance) error {
@@ -662,7 +714,32 @@ func (d *Dispatcher) healthLoop(ctx context.Context) {
 	}
 }
 
+func (d *Dispatcher) sweepAttachments() {
+	maxAge := 7 * 24 * time.Hour
+	entries, err := os.ReadDir(d.opts.AttachDir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-maxAge)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			path := filepath.Join(d.opts.AttachDir, e.Name())
+			if err := os.Remove(path); err == nil {
+				d.logger.Info("swept old attachment", "path", path, "age_days", int(time.Since(info.ModTime()).Hours()/24))
+			}
+		}
+	}
+}
+
 func (d *Dispatcher) checkHealth(ctx context.Context) {
+	d.sweepAttachments()
 	all, err := d.store.All()
 	if err != nil {
 		return
@@ -714,6 +791,49 @@ func (d *Dispatcher) Logs(chatID int64, threadID int) (string, error) {
 }
 
 // --- helpers ---
+
+// normalizeRepoURL accepts three URL formats and converts to SSH:
+//   git@host:org/repo.git   → pass through
+//   https://host/org/repo   → git@host:org/repo.git
+//   host/org/repo           → git@host:org/repo.git
+// Rejects flag-like input (starts with -) and URLs that don't look like a valid repo path.
+func normalizeRepoURL(raw string) (string, error) {
+	if strings.HasPrefix(raw, "-") {
+		return "", fmt.Errorf("URL must not start with a dash")
+	}
+
+	// SSH format: git@host:path
+	if strings.HasPrefix(raw, "git@") {
+		// Minimal validation: must have a colon and path after it.
+		if !strings.Contains(raw[4:], ":") {
+			return "", fmt.Errorf("SSH URL missing colon: %q", raw)
+		}
+		if !strings.HasSuffix(raw, ".git") {
+			raw += ".git"
+		}
+		return raw, nil
+	}
+
+	// Strip scheme if present.
+	u := raw
+	if after, ok := strings.CutPrefix(u, "https://"); ok {
+		u = after
+	} else if after, ok := strings.CutPrefix(u, "http://"); ok {
+		u = after
+	}
+
+	// Now we expect: host/org/repo or host/org/repo.git
+	// Must have at least host/org/repo (2 slashes worth of path).
+	parts := strings.SplitN(u, "/", 3)
+	if len(parts) < 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return "", fmt.Errorf("expected format: host/org/repo, got %q", raw)
+	}
+	host := parts[0]
+	path := parts[1] + "/" + parts[2]
+	path = strings.TrimSuffix(path, ".git")
+
+	return fmt.Sprintf("git@%s:%s.git", host, path), nil
+}
 
 func randomHex(n int) (string, error) {
 	buf := make([]byte, n)
