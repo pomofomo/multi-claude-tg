@@ -55,6 +55,11 @@ type Dispatcher struct {
 	// pending download responses, keyed by (instance_id+req_id) -> callback chan.
 	pendingMu sync.Mutex
 	pending   map[string]chan ws.Frame
+
+	// rateLimited tracks instances that hit Claude's rate limit, so we
+	// only notify once and can detect recovery.
+	rateLimitedMu sync.Mutex
+	rateLimited   map[string]bool
 }
 
 type liveConn struct {
@@ -116,8 +121,9 @@ func New(opts Options) (*Dispatcher, error) {
 		tg:      telegram.New(opts.TelegramToken),
 		store:   store,
 		media:   engine,
-		conns:   map[string]*liveConn{},
-		pending: map[string]chan ws.Frame{},
+		conns:       map[string]*liveConn{},
+		pending:     map[string]chan ws.Frame{},
+		rateLimited: map[string]bool{},
 	}
 	d.server = ws.New(fmt.Sprintf("127.0.0.1:%d", opts.Port), opts.Logger, d)
 	return d, nil
@@ -1063,25 +1069,97 @@ func (d *Dispatcher) checkHealth(ctx context.Context) {
 		if inst.State != storage.StateRunning {
 			continue
 		}
-		if tmuxmgr.HasSession(tmuxmgr.SessionName(inst.InstanceID)) {
+		name := tmuxmgr.SessionName(inst.InstanceID)
+		if !tmuxmgr.HasSession(name) {
+			// Session dead — restart it.
+			d.logger.Warn("session dead, restarting", "instance", inst.InstanceID, "fails", inst.FailCount)
+			if inst.FailCount >= 3 {
+				inst.State = storage.StateFailed
+				_ = d.store.Put(inst)
+				d.sendText(ctx, inst.ChatID, inst.TopicID,
+					"Instance failed to start after 3 attempts. Use /restart to retry.")
+				continue
+			}
+			if err := d.launchTmux(inst); err != nil {
+				inst.FailCount++
+				_ = d.store.Put(inst)
+				d.logger.Warn("restart failed", "err", err)
+				continue
+			}
+			inst.FailCount = 0
+			_ = d.store.Put(inst)
 			continue
 		}
-		d.logger.Warn("session dead, restarting", "instance", inst.InstanceID, "fails", inst.FailCount)
-		if inst.FailCount >= 3 {
-			inst.State = storage.StateFailed
-			_ = d.store.Put(inst)
+		// Session alive — check for rate-limit or stuck state.
+		d.checkRateLimit(ctx, inst, name)
+	}
+}
+
+// checkRateLimit inspects a running tmux pane for Claude's rate-limit prompt
+// and auto-dismisses it. Notifies the topic once when rate-limited and again
+// when recovered.
+func (d *Dispatcher) checkRateLimit(ctx context.Context, inst storage.Instance, sessionName string) {
+	out, err := tmuxmgr.CapturePane(sessionName)
+	if err != nil {
+		return
+	}
+	pane := strings.TrimSpace(out)
+	if pane == "" {
+		return
+	}
+
+	d.rateLimitedMu.Lock()
+	wasLimited := d.rateLimited[inst.InstanceID]
+	d.rateLimitedMu.Unlock()
+
+	isLimited := strings.Contains(pane, "rate-limit-options") ||
+		strings.Contains(pane, "hit your limit") ||
+		strings.Contains(pane, "You've hit your limit")
+
+	if isLimited {
+		// Auto-dismiss the rate-limit menu by pressing Enter.
+		d.logger.Info("rate-limit detected, auto-dismissing",
+			"instance", shortID(inst.InstanceID))
+		_ = tmuxmgr.SendKeys(sessionName, "Enter")
+
+		if !wasLimited {
+			d.rateLimitedMu.Lock()
+			d.rateLimited[inst.InstanceID] = true
+			d.rateLimitedMu.Unlock()
+
+			// Extract reset time if visible.
+			resetInfo := ""
+			for _, line := range strings.Split(pane, "\n") {
+				if strings.Contains(line, "resets") {
+					resetInfo = " (" + strings.TrimSpace(line) + ")"
+					break
+				}
+			}
 			d.sendText(ctx, inst.ChatID, inst.TopicID,
-				"Instance failed to start after 3 attempts. Use /restart to retry.")
-			continue
+				"⏳ Claude hit a rate limit"+resetInfo+". Auto-waiting for it to reset — no action needed.")
 		}
-		if err := d.launchTmux(inst); err != nil {
-			inst.FailCount++
-			_ = d.store.Put(inst)
-			d.logger.Warn("restart failed", "err", err)
-			continue
+		return
+	}
+
+	// Check if we're in "waiting for limit" state.
+	isWaiting := strings.Contains(pane, "Waiting for") && strings.Contains(pane, "limit")
+	if isWaiting {
+		if !wasLimited {
+			d.rateLimitedMu.Lock()
+			d.rateLimited[inst.InstanceID] = true
+			d.rateLimitedMu.Unlock()
 		}
-		inst.FailCount = 0
-		_ = d.store.Put(inst)
+		return
+	}
+
+	// If previously rate-limited but pane looks normal now → recovered.
+	if wasLimited {
+		d.rateLimitedMu.Lock()
+		d.rateLimited[inst.InstanceID] = false
+		d.rateLimitedMu.Unlock()
+		d.logger.Info("rate-limit recovered", "instance", shortID(inst.InstanceID))
+		d.sendText(ctx, inst.ChatID, inst.TopicID,
+			"✅ Rate limit cleared — Claude is back.")
 	}
 }
 
