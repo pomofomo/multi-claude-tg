@@ -24,7 +24,7 @@ A single Go binary (`trd`) that:
 | `bun` | runs the channel plugin (MCP server) | `curl -fsSL https://bun.sh/install \| bash` |
 | `claude` (Claude Code CLI) | the thing being talked to | `npm i -g @anthropic-ai/claude-code` |
 | Go 1.22+ *(dev only)* | build from source (CGo required) | [go.dev/dl](https://go.dev/dl) |
-| `ffmpeg` *(for voice features)* | audio format conversion | `apt install ffmpeg` / `brew install ffmpeg` |
+| `libopus-dev` *(build only)* | Opus audio codec for voice | `apt install libopus-dev libopusfile-dev` / `brew install opus opusfile` |
 
 Run `bash scripts/install.sh` for an interactive prerequisite check — it tells you what's missing and how to install it on your platform.
 
@@ -226,13 +226,16 @@ export TRD_TTS_MODEL_DIR=/path/to/tts/model
 | **TTS (embedded)** | `TRD_TTS_MODEL_DIR` | `~/.trd/models/tts/` |
 | **OpenAI API** (fallback) | `TRD_OPENAI_API_KEY` | — (used when models not installed) |
 
-**Whisper flow:** voice/audio message → dispatcher downloads OGG → ffmpeg
-converts to 16kHz WAV → sherpa-onnx whisper transcribes in-process → sends
+**Whisper flow:** voice/audio message → dispatcher downloads OGG → Go Opus
+decoder extracts PCM → sherpa-onnx whisper transcribes in-process → sends
 transcript as the message text to Claude (original audio still attached).
 
 **TTS flow:** Claude calls `send_voice` tool with text → sherpa-onnx VITS
-synthesizes WAV in-process → ffmpeg converts to OGG → sent as Telegram voice
-message.
+synthesizes PCM in-process → Go Opus encoder writes OGG → sent as Telegram
+voice message.
+
+No ffmpeg or other external audio tools needed — everything is compiled into
+the `trd` binary.
 
 **Smart outbound media:** when Claude attaches files in `reply`, the dispatcher
 detects the file type and uses the appropriate Telegram method:

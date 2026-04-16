@@ -14,13 +14,14 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
+
+	"github.com/pomofomo/multi-claude-tg/internal/audio"
 )
 
 var ErrNotConfigured = errors.New("not configured")
@@ -265,27 +266,30 @@ func (e *Engine) Synthesize(ctx context.Context, text, outDir string) (string, e
 
 // --- Whisper transcription ---
 
-func (e *Engine) transcribeSherpa(ctx context.Context, audioPath string) (string, error) {
-	// sherpa-onnx ReadWave only accepts WAV. Convert via ffmpeg.
-	wavPath := audioPath
-	needsCleanup := false
-	if ext := strings.ToLower(filepath.Ext(audioPath)); ext != ".wav" {
-		wavPath = audioPath + ".wav"
-		ffmpeg := exec.CommandContext(ctx, "ffmpeg", "-i", audioPath,
-			"-ar", "16000", "-ac", "1", "-f", "wav", "-acodec", "pcm_s16le",
-			wavPath, "-y")
-		if ffOut, err := ffmpeg.CombinedOutput(); err != nil {
-			return "", fmt.Errorf("ffmpeg convert failed: %w\noutput: %s", err, ffOut)
+func (e *Engine) transcribeSherpa(_ context.Context, audioPath string) (string, error) {
+	// Decode audio to PCM float32 at 16kHz (sherpa-onnx whisper expects this).
+	var samples []float32
+	ext := strings.ToLower(filepath.Ext(audioPath))
+
+	switch ext {
+	case ".wav":
+		wave := sherpa.ReadWave(audioPath)
+		if wave == nil {
+			return "", fmt.Errorf("failed to read WAV: %s", audioPath)
 		}
-		needsCleanup = true
+		samples = wave.Samples
+	case ".ogg", ".oga", ".opus":
+		var err error
+		samples, err = audio.DecodeOGGOpus(audioPath, 16000)
+		if err != nil {
+			return "", fmt.Errorf("decode OGG/Opus: %w", err)
+		}
+	default:
+		return "", fmt.Errorf("unsupported audio format %q — expected .wav, .ogg, .oga, or .opus", ext)
 	}
 
-	wave := sherpa.ReadWave(wavPath)
-	if needsCleanup {
-		os.Remove(wavPath)
-	}
-	if wave == nil {
-		return "", fmt.Errorf("failed to read WAV: %s", wavPath)
+	if len(samples) == 0 {
+		return "", fmt.Errorf("no audio samples decoded from %s", audioPath)
 	}
 
 	e.whisperMu.Lock()
@@ -294,7 +298,7 @@ func (e *Engine) transcribeSherpa(ctx context.Context, audioPath string) (string
 	stream := sherpa.NewOfflineStream(e.whisper)
 	defer sherpa.DeleteOfflineStream(stream)
 
-	stream.AcceptWaveform(wave.SampleRate, wave.Samples)
+	stream.AcceptWaveform(16000, samples)
 	e.whisper.Decode(stream)
 
 	result := stream.GetResult()
@@ -362,24 +366,27 @@ func (e *Engine) synthesizeSherpa(_ context.Context, text, outDir string) (strin
 		Sid:          0,
 	}
 
-	audio := e.tts.GenerateWithConfig(text, &cfg, nil)
-	if len(audio.Samples) == 0 {
+	generated := e.tts.GenerateWithConfig(text, &cfg, nil)
+	if len(generated.Samples) == 0 {
 		return "", fmt.Errorf("sherpa-onnx produced no audio")
 	}
 
-	wavPath := filepath.Join(outDir, fmt.Sprintf("tts-%d.wav", time.Now().UnixNano()))
-	if ok := audio.Save(wavPath); !ok {
-		return "", fmt.Errorf("sherpa-onnx failed to save WAV to %s", wavPath)
+	// Opus requires specific sample rates (8000/12000/16000/24000/48000).
+	// Resample to 48000 if the TTS output rate isn't supported.
+	samples := generated.Samples
+	rate := generated.SampleRate
+	switch rate {
+	case 8000, 12000, 16000, 24000, 48000:
+		// Supported natively.
+	default:
+		samples = audio.Resample(samples, rate, 48000)
+		rate = 48000
 	}
-	defer os.Remove(wavPath)
 
-	// Convert WAV to OGG/Opus for Telegram voice messages.
+	// Encode directly to OGG/Opus (no intermediate WAV, no ffmpeg).
 	oggPath := filepath.Join(outDir, fmt.Sprintf("tts-%d.ogg", time.Now().UnixNano()))
-	ffmpeg := exec.Command("ffmpeg", "-i", wavPath, "-c:a", "libopus", "-b:a", "64k", oggPath, "-y")
-	if ffOut, err := ffmpeg.CombinedOutput(); err != nil {
-		// If ffmpeg fails, fall back to sending the WAV.
-		_ = os.Rename(wavPath, oggPath)
-		_ = ffOut
+	if err := audio.EncodeOGGOpus(samples, rate, oggPath); err != nil {
+		return "", fmt.Errorf("encode OGG/Opus: %w", err)
 	}
 	return oggPath, nil
 }

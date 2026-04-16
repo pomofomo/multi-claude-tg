@@ -15,7 +15,7 @@ cd multi-claude-tg
 make install-deps         # interactive check — tells you what's missing
 ```
 
-You need: `git`, `tmux`, `bun`, `claude` (Claude Code CLI), Go 1.22+, and `ffmpeg` (for voice features).
+You need: `git`, `tmux`, `bun`, `claude` (Claude Code CLI), and Go 1.22+ (with `libopus-dev` for voice features).
 
 ## 3. Create a Telegram bot
 
