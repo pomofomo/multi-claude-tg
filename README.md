@@ -27,6 +27,8 @@ A single Go binary (`trd`) that:
 
 Run `bash scripts/install.sh` for an interactive prerequisite check — it tells you what's missing and how to install it on your platform.
 
+**Note:** for kokoro with uv, you need this as a bugfix for spacy: `uv pip install pip --python $HOME$/.local/share/uv/tools/kokoro/bin/python`
+
 ## What installs where
 
 TRD has two install scopes:

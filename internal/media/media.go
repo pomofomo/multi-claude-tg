@@ -28,9 +28,8 @@ type Config struct {
 	// Example: "whisper --model base --output_format txt"
 	WhisperCmd string
 
-	// TTSCmd is a CLI command that receives a text file path as the first
-	// argument and an output audio file path as the second.
-	// Example: "kokoro" → invoked as: kokoro <text.txt> <out.ogg>
+	// TTSCmd is a CLI command for TTS synthesis.
+	// Example: "kokoro" → invoked as: kokoro -i <text.txt> -o <out.ogg>
 	TTSCmd string
 
 	// OpenAIAPIKey enables the OpenAI API for Whisper and/or TTS when
@@ -175,7 +174,7 @@ func (c Config) synthesizeCLI(ctx context.Context, text, outDir string) (string,
 
 	outPath := filepath.Join(outDir, fmt.Sprintf("tts-%d.ogg", time.Now().UnixNano()))
 	parts := strings.Fields(c.TTSCmd)
-	args := append(parts[1:], textFile.Name(), outPath)
+	args := append(parts[1:], "-i", textFile.Name(), "-o", outPath)
 	cmd := exec.CommandContext(ctx, parts[0], args...)
 	cmdOut, err := cmd.CombinedOutput()
 	if err != nil {
