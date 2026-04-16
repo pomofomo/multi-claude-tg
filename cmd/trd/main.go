@@ -8,8 +8,10 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,8 +26,13 @@ const usage = `trd — Telegram Repo Dispatcher
 Usage:
   trd start --telegram-token <token> [--port 7777]
   trd status
-  trd stop <topic-or-instance-prefix>
-  trd logs <topic-or-instance-prefix>
+  trd list
+  trd stop  <name-or-prefix>
+  trd logs  <name-or-prefix>
+  trd shell <name-or-prefix>
+  trd cd    <name-or-prefix>
+
+<name-or-prefix> matches against repo name first, then instance ID prefix.
 
 Env:
   TELEGRAM_BOT_TOKEN     default for --telegram-token
@@ -43,12 +50,16 @@ func main() {
 	switch sub {
 	case "start":
 		cmdStart(args)
-	case "status":
+	case "status", "list":
 		cmdStatus(args)
 	case "stop":
 		cmdStop(args)
 	case "logs":
 		cmdLogs(args)
+	case "shell":
+		cmdShell(args)
+	case "cd":
+		cmdCd(args)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
@@ -115,10 +126,52 @@ func cmdStatus(args []string) {
 	}
 	for _, inst := range all {
 		alive := tmuxmgr.HasSession(tmuxmgr.SessionName(inst.InstanceID))
-		fmt.Printf("%s  %s  topic=%d  state=%s  tmux=%v  repo=%s\n",
-			inst.InstanceID[:8], shortTime(inst.CreatedAt),
-			inst.TopicID, inst.State, alive, inst.RepoURL)
+		name := inst.RepoName
+		if name == "" {
+			name = storage.RepoNameFromURL(inst.RepoURL)
+		}
+		fmt.Printf("%-20s %s  %s  state=%-8s tmux=%v  %s\n",
+			name, inst.InstanceID[:8], shortTime(inst.CreatedAt),
+			inst.State, alive, inst.RepoURL)
 	}
+}
+
+func cmdShell(args []string) {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: trd shell <name-or-prefix>")
+		os.Exit(2)
+	}
+	inst, err := findInstance(args[0])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	fmt.Fprintf(os.Stderr, "opening shell in %s (%s)\n", inst.RepoPath, inst.RepoName)
+	cmd := exec.Command(shell)
+	cmd.Dir = inst.RepoPath
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func cmdCd(args []string) {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: trd cd <name-or-prefix>")
+		os.Exit(2)
+	}
+	inst, err := findInstance(args[0])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println(inst.RepoPath)
 }
 
 func cmdStop(args []string) {
@@ -158,7 +211,7 @@ func cmdLogs(args []string) {
 	_, _ = io.Copy(os.Stdout, asReader(out))
 }
 
-func findInstance(prefix string) (*storage.Instance, error) {
+func findInstance(query string) (*storage.Instance, error) {
 	dbPath, _ := config.StateDBPath()
 	store, err := storage.Open(dbPath)
 	if err != nil {
@@ -169,24 +222,38 @@ func findInstance(prefix string) (*storage.Instance, error) {
 	if err != nil {
 		return nil, err
 	}
-	var matches []storage.Instance
+	// First pass: match on repo name (exact or prefix).
+	var byName []storage.Instance
 	for _, inst := range all {
-		if len(prefix) > 0 && (inst.InstanceID == prefix || startsWith(inst.InstanceID, prefix)) {
-			matches = append(matches, inst)
+		name := inst.RepoName
+		if name == "" {
+			name = storage.RepoNameFromURL(inst.RepoURL)
+		}
+		if strings.EqualFold(name, query) || strings.HasPrefix(strings.ToLower(name), strings.ToLower(query)) {
+			byName = append(byName, inst)
 		}
 	}
-	switch len(matches) {
-	case 0:
-		return nil, fmt.Errorf("no instance matching %q", prefix)
-	case 1:
-		return &matches[0], nil
-	default:
-		return nil, fmt.Errorf("%d instances match %q — use a longer prefix", len(matches), prefix)
+	if len(byName) == 1 {
+		return &byName[0], nil
 	}
-}
-
-func startsWith(s, prefix string) bool {
-	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
+	if len(byName) > 1 {
+		return nil, fmt.Errorf("%d instances match repo name %q — use a longer prefix or instance ID", len(byName), query)
+	}
+	// Second pass: match on instance ID prefix.
+	var byID []storage.Instance
+	for _, inst := range all {
+		if strings.HasPrefix(inst.InstanceID, query) {
+			byID = append(byID, inst)
+		}
+	}
+	switch len(byID) {
+	case 0:
+		return nil, fmt.Errorf("no instance matching %q", query)
+	case 1:
+		return &byID[0], nil
+	default:
+		return nil, fmt.Errorf("%d instances match %q — use a longer prefix", len(byID), query)
+	}
 }
 
 func envInt(key string, def int) int {
@@ -223,15 +290,4 @@ func dirOf(path string) string {
 
 func shortTime(t time.Time) string { return t.UTC().Format("2006-01-02 15:04") }
 
-type stringReader struct{ s string; i int }
-
-func (r *stringReader) Read(p []byte) (int, error) {
-	if r.i >= len(r.s) {
-		return 0, io.EOF
-	}
-	n := copy(p, r.s[r.i:])
-	r.i += n
-	return n, nil
-}
-
-func asReader(s string) io.Reader { return &stringReader{s: s} }
+func asReader(s string) io.Reader { return strings.NewReader(s) }

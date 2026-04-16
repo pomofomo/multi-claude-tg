@@ -325,11 +325,13 @@ func (d *Dispatcher) handleMessage(ctx context.Context, m *telegram.Message) {
 	}
 	hasDoc := m.Document != nil
 	nPhotos := len(m.Photo)
+	hasVoice := m.Voice != nil
+	hasAudio := m.Audio != nil
 	d.logger.Info("tg recv",
 		"chat", m.Chat.ID, "chat_type", m.Chat.Type, "is_forum", m.Chat.IsForum,
 		"thread", m.MessageThreadID, "msg_id", m.MessageID,
 		"from", user, "text_len", len(rawText), "text", preview(rawText),
-		"has_doc", hasDoc, "photos", nPhotos,
+		"has_doc", hasDoc, "photos", nPhotos, "voice", hasVoice, "audio", hasAudio,
 	)
 	if m.Chat.Type != "supergroup" || !m.Chat.IsForum {
 		d.logger.Info("tg recv rejected: not forum supergroup", "chat", m.Chat.ID, "chat_type", m.Chat.Type)
@@ -428,6 +430,7 @@ func (d *Dispatcher) cmdStart(ctx context.Context, m *telegram.Message, repoURL 
 		TopicID:    m.MessageThreadID,
 		RepoURL:    repoURL,
 		RepoPath:   repoPath,
+		RepoName:   storage.RepoNameFromURL(repoURL),
 		Secret:     secret,
 		State:      storage.StateRunning,
 	}
@@ -551,9 +554,14 @@ func (d *Dispatcher) routeToInstance(ctx context.Context, m *telegram.Message, t
 		frame.AttachmentFileID = m.Document.FileID
 		frame.AttachmentName = m.Document.FileName
 	} else if len(m.Photo) > 0 {
-		// Largest photo is last.
 		ph := m.Photo[len(m.Photo)-1]
 		frame.AttachmentFileID = ph.FileID
+	} else if m.Voice != nil {
+		frame.AttachmentFileID = m.Voice.FileID
+		frame.AttachmentName = "voice.ogg"
+	} else if m.Audio != nil {
+		frame.AttachmentFileID = m.Audio.FileID
+		frame.AttachmentName = m.Audio.FileName
 	}
 	d.mu.RLock()
 	_, connected := d.conns[inst.InstanceID]
@@ -742,14 +750,16 @@ func preview(s string) string {
 	return s
 }
 
-// writeMCPConfig drops a .mcp.json into the repo so Claude finds the channel plugin.
+// writeMCPConfig merges a trd-channel entry into the repo's .mcp.json so Claude
+// finds the channel plugin. If the repo already has an .mcp.json, we preserve
+// existing servers and only add/overwrite the "trd-channel" key.
 //
-// Resolution order:
-//  1. $TRD_CHANNEL_ENTRY set to an absolute path → `bun run <path>` (dev install)
-//  2. $TRD_CHANNEL_ENTRY set to anything else   → `bun run $TRD_CHANNEL_ENTRY`
-//  3. default                                    → `trd-channel` (npm bin on PATH)
+// Resolution order for the channel command:
+//  1. $TRD_CHANNEL_ENTRY set → `bun run <path>` (dev install)
+//  2. default               → `trd-channel` (npm bin on PATH)
 func writeMCPConfig(repoPath string) error {
 	mcpPath := filepath.Join(repoPath, ".mcp.json")
+
 	entry := os.Getenv("TRD_CHANNEL_ENTRY")
 	var command string
 	var args []string
@@ -760,15 +770,30 @@ func writeMCPConfig(repoPath string) error {
 		command = "trd-channel"
 		args = []string{}
 	}
-	argsJSON, _ := json.Marshal(args)
-	content := fmt.Sprintf(`{
-  "mcpServers": {
-    "trd-channel": {
-      "command": %q,
-      "args": %s
-    }
-  }
-}
-`, command, string(argsJSON))
-	return os.WriteFile(mcpPath, []byte(content), 0o644)
+
+	type serverDef struct {
+		Command string   `json:"command"`
+		Args    []string `json:"args"`
+	}
+	type mcpFile struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	}
+
+	var existing mcpFile
+	if data, err := os.ReadFile(mcpPath); err == nil {
+		_ = json.Unmarshal(data, &existing)
+	}
+	if existing.MCPServers == nil {
+		existing.MCPServers = make(map[string]json.RawMessage)
+	}
+
+	trdEntry, _ := json.Marshal(serverDef{Command: command, Args: args})
+	existing.MCPServers["trd-channel"] = trdEntry
+
+	out, err := json.MarshalIndent(existing, "", "  ")
+	if err != nil {
+		return err
+	}
+	out = append(out, '\n')
+	return os.WriteFile(mcpPath, out, 0o644)
 }

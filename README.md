@@ -25,11 +25,23 @@ A single Go binary (`trd`) that:
 
 Run `bash scripts/install.sh` for an interactive prerequisite check — it tells you what's missing and how to install it on your platform.
 
-## Install into your local Claude instance
+## What installs where
 
-These instructions assume **prerequisites are already prepared** (see above).
+TRD has two install scopes:
 
-### Option A — Install from source (recommended for now)
+| Scope | What | Where | Who creates it |
+|-------|------|-------|----------------|
+| **User-level** | `trd` binary (dispatcher) | `~/.local/bin/trd` or npm global | You, once |
+| **User-level** | `trd-channel` (MCP plugin) | npm global bin or `channel/index.ts` (dev) | You, once |
+| **User-level** | State directory | `~/.trd/` (state.db, trd.log, attachments/) | `trd start`, auto |
+| **Per-repo** | Identity file | `<repo>/.trd/config.json` (mode 0600) | `/start` command, auto |
+| **Per-repo** | MCP config | `<repo>/.mcp.json` (merged, not clobbered) | `/start` command, auto |
+
+The dispatcher is a long-running process you start once. Per-repo files are created automatically when you `/start` a repo from Telegram — you never touch them.
+
+## Install
+
+### Option A — From source (recommended for now)
 
 ```bash
 git clone https://github.com/pomofomo/multi-claude-tg.git
@@ -41,18 +53,17 @@ make build                 # produces bin/trd
 # 2. Install the channel plugin's deps.
 cd channel && bun install && cd ..
 
-# 3. Tell Claude where to find the channel plugin at runtime.
-#    The dispatcher writes a per-repo .mcp.json on /start that points at
-#    the `trd-channel` binary. By default that resolves via the npm-installed
-#    bin; when running from source, export:
+# 3. Tell the dispatcher where the channel plugin lives.
+#    On /start, trd writes each repo's .mcp.json to point at this.
+#    Default (npm install): resolves `trd-channel` from PATH.
+#    From source: set this env var so it uses your local checkout.
 export TRD_CHANNEL_ENTRY="$PWD/channel/index.ts"
 
-# 4. Put the dispatcher on your PATH, or call it with an absolute path.
-sudo ln -s "$PWD/bin/trd" /usr/local/bin/trd   # or symlink into ~/.local/bin
-ln -s "$PWD/bin/trd" $HOME/.local/bin/trd
+# 4. Put the dispatcher on your PATH.
+ln -s "$PWD/bin/trd" "$HOME/.local/bin/trd"
 ```
 
-### Option B — Install as an npm package (once published)
+### Option B — npm package (once published)
 
 ```bash
 npm install -g telegram-repo-dispatcher
@@ -94,10 +105,15 @@ Anything that's not a slash command gets forwarded to Claude in that topic.
 
 ## Local CLI
 
+All commands accept a **repo name** or **instance-ID prefix** as `<name>`.
+
 ```bash
-trd status           # list all instances
-trd stop <prefix>    # kill by instance-id prefix
-trd logs <prefix>    # dump the current tmux pane for the instance
+trd list               # all instances: repo name, state, tmux, URL
+trd status             # alias for list
+trd shell <name>       # open $SHELL in the repo directory
+trd cd <name>          # print the repo path (use: cd $(trd cd backend))
+trd stop <name>        # kill the tmux session
+trd logs <name>        # dump the current tmux pane
 ```
 
 ## File layout

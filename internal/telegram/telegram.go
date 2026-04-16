@@ -41,16 +41,18 @@ type Update struct {
 
 // Message is a subset of the Bot API Message object.
 type Message struct {
-	MessageID       int       `json:"message_id"`
-	MessageThreadID int       `json:"message_thread_id,omitempty"`
-	From            *User     `json:"from,omitempty"`
-	Chat            Chat      `json:"chat"`
-	Date            int64     `json:"date"`
-	Text            string    `json:"text,omitempty"`
-	Caption         string    `json:"caption,omitempty"`
+	MessageID       int         `json:"message_id"`
+	MessageThreadID int         `json:"message_thread_id,omitempty"`
+	From            *User       `json:"from,omitempty"`
+	Chat            Chat        `json:"chat"`
+	Date            int64       `json:"date"`
+	Text            string      `json:"text,omitempty"`
+	Caption         string      `json:"caption,omitempty"`
 	Photo           []PhotoSize `json:"photo,omitempty"`
-	Document        *Document `json:"document,omitempty"`
-	IsTopicMessage  bool      `json:"is_topic_message,omitempty"`
+	Document        *Document   `json:"document,omitempty"`
+	Voice           *Voice      `json:"voice,omitempty"`
+	Audio           *Audio      `json:"audio,omitempty"`
+	IsTopicMessage  bool        `json:"is_topic_message,omitempty"`
 }
 
 // User is a subset of the Bot API User object.
@@ -83,6 +85,25 @@ type Document struct {
 	FileName string `json:"file_name,omitempty"`
 	MimeType string `json:"mime_type,omitempty"`
 	FileSize int    `json:"file_size,omitempty"`
+}
+
+// Voice is a voice message (OGG/Opus).
+type Voice struct {
+	FileID   string `json:"file_id"`
+	Duration int    `json:"duration"`
+	MimeType string `json:"mime_type,omitempty"`
+	FileSize int    `json:"file_size,omitempty"`
+}
+
+// Audio is an audio file (MP3, etc.).
+type Audio struct {
+	FileID    string `json:"file_id"`
+	Duration  int    `json:"duration"`
+	Performer string `json:"performer,omitempty"`
+	Title     string `json:"title,omitempty"`
+	FileName  string `json:"file_name,omitempty"`
+	MimeType  string `json:"mime_type,omitempty"`
+	FileSize  int    `json:"file_size,omitempty"`
 }
 
 type apiResp[T any] struct {

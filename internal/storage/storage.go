@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -32,11 +33,27 @@ type Instance struct {
 	TopicID     int       `json:"topic_id"` // message_thread_id; 0 means no topic (General)
 	RepoURL     string    `json:"repo_url"`
 	RepoPath    string    `json:"repo_path"`
+	RepoName    string    `json:"repo_name"`
 	Secret      string    `json:"secret"`
 	State       State     `json:"state"`
 	FailCount   int       `json:"fail_count"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// RepoNameFromURL extracts a short repo name from a git URL.
+// "git@github.com:org/repo.git" → "repo", "https://github.com/org/repo" → "repo".
+func RepoNameFromURL(u string) string {
+	// Strip trailing .git
+	u = strings.TrimSuffix(u, ".git")
+	// Take everything after the last / or :
+	if i := strings.LastIndexAny(u, "/:"); i >= 0 {
+		u = u[i+1:]
+	}
+	if u == "" {
+		return "unknown"
+	}
+	return u
 }
 
 // Store wraps a bbolt DB.
