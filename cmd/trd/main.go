@@ -3,10 +3,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -102,22 +104,40 @@ func cmdStart(args []string) {
 	logger.Info("trd stopped")
 }
 
-func cmdStatus(args []string) {
-	_ = args
+// allInstances tries the running dispatcher's HTTP API first, then falls back
+// to opening the bbolt DB directly (which only works when the server is stopped).
+func allInstances() ([]storage.Instance, error) {
+	port := envInt("TRD_PORT", 7777)
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/instances", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			var instances []storage.Instance
+			if err := json.NewDecoder(resp.Body).Decode(&instances); err == nil {
+				return instances, nil
+			}
+		}
+	}
+	// Fallback: open DB directly (works when server is not running).
 	dbPath, _ := config.StateDBPath()
 	if _, err := os.Stat(dbPath); err != nil {
-		fmt.Println("no state db yet — trd has never run")
-		return
+		return nil, nil // no DB yet
 	}
 	store, err := storage.Open(dbPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "open db:", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("open db: %w", err)
 	}
 	defer store.Close()
-	all, err := store.All()
+	return store.All()
+}
+
+func cmdStatus(args []string) {
+	_ = args
+	all, err := allInstances()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "list:", err)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	if len(all) == 0 {
@@ -212,13 +232,7 @@ func cmdLogs(args []string) {
 }
 
 func findInstance(query string) (*storage.Instance, error) {
-	dbPath, _ := config.StateDBPath()
-	store, err := storage.Open(dbPath)
-	if err != nil {
-		return nil, err
-	}
-	defer store.Close()
-	all, err := store.All()
+	all, err := allInstances()
 	if err != nil {
 		return nil, err
 	}

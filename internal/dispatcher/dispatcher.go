@@ -281,6 +281,15 @@ func (d *Dispatcher) sendTo(instanceID string, frame ws.Frame) {
 	}
 }
 
+// ListInstances returns all instances as JSON for the CLI API endpoint.
+func (d *Dispatcher) ListInstances() ([]byte, error) {
+	all, err := d.store.All()
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(all)
+}
+
 // --- Telegram long-poll and command handling ---
 
 // Run starts the WS server and Telegram long-poll. Blocks until ctx is canceled.
@@ -729,15 +738,16 @@ func (d *Dispatcher) launchTmux(inst storage.Instance) error {
 		"TRD_INSTANCE_ID=" + inst.InstanceID,
 	}
 
-	// Claude's `--dangerously-load-development-channels` shows an interactive
-	// "are you sure?" prompt. We auto-dismiss it by sending the keystrokes a
-	// few seconds after session creation. Override via env if the default
-	// doesn't match the current Claude build's prompt.
+	// Claude's `--dangerously-load-development-channels` authorizes named MCP
+	// servers to send channel notifications. The argument must match the server
+	// name in .mcp.json ("server:trd-channel").
+	// It may show an interactive prompt; we auto-dismiss it by sending keystrokes
+	// a few seconds after session creation.
 	delay := firstNonEmpty(os.Getenv("TRD_CLAUDE_CONFIRM_DELAY"), "3")
 	keys := firstNonEmpty(os.Getenv("TRD_CLAUDE_CONFIRM_KEYS"), "Enter")
 	claudeBin := firstNonEmpty(os.Getenv("TRD_CLAUDE_BIN"), "claude")
 	claudeArgs := firstNonEmpty(os.Getenv("TRD_CLAUDE_ARGS"),
-		"--dangerously-skip-permissions --dangerously-load-development-channels server:trd-channel")
+	"--debug --dangerously-skip-permissions --dangerously-load-development-channels server:trd-channel")
 
 	// The channel plugin is discovered via the repo's .mcp.json we wrote at clone time.
 	// Background a confirm-sender that runs inside the same tmux server; if

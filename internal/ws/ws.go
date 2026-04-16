@@ -37,6 +37,8 @@ type Handler interface {
 	Register(instanceID string, conn *Conn) <-chan Frame
 	// Unregister clears the live link when the conn drops.
 	Unregister(instanceID string, conn *Conn)
+	// ListInstances returns JSON-encoded instance list for the CLI API.
+	ListInstances() ([]byte, error)
 }
 
 // Frame is one JSON frame across the WS.
@@ -112,6 +114,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("/api/instances", s.handleAPIInstances)
 	mux.HandleFunc("/channel", s.handleChannel)
 	s.srv = &http.Server{Addr: s.addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
@@ -128,6 +131,21 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		}
 		return err
 	}
+}
+
+// handleAPIInstances returns the instance list as JSON for CLI commands.
+func (s *Server) handleAPIInstances(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	data, err := s.h.ListInstances()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
 }
 
 // handleChannel validates ?secret= and upgrades to WebSocket.

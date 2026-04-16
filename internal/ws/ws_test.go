@@ -77,6 +77,10 @@ func (h *fakeHandler) Unregister(instanceID string, _ *Conn) {
 	h.mu.Unlock()
 }
 
+func (h *fakeHandler) ListInstances() ([]byte, error) {
+	return []byte("[]"), nil
+}
+
 func TestHandleChannelRejectsNoSecret(t *testing.T) {
 	h := newFakeHandler()
 	s := New("127.0.0.1:0", nil, h)

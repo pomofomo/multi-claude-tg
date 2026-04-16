@@ -22,8 +22,8 @@ A single Go binary (`trd`) that:
 | `bun` | runs the channel plugin (MCP server) | `curl -fsSL https://bun.sh/install \| bash` |
 | `claude` (Claude Code CLI) | the thing being talked to | `npm i -g @anthropic-ai/claude-code` |
 | Go 1.22+ *(dev only)* | build from source | [go.dev/dl](https://go.dev/dl) |
-| `whisper` *(optional)* | transcribe voice messages | `pip3 install openai-whisper` |
-| `kokoro` *(optional)* | text-to-speech replies | `pip3 install kokoro` |
+| `whisper` *(optional)* | transcribe voice messages | `pip3 install openai-whisper` or `uv tool install openai-whisper` |
+| `kokoro` *(optional)* | text-to-speech replies | `pip3 install kokoro` or `uv tool install kokoro` |
 
 Run `bash scripts/install.sh` for an interactive prerequisite check — it tells you what's missing and how to install it on your platform.
 

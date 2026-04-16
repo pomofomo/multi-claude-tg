@@ -12,13 +12,23 @@
 //      Claude calls them, they're serialized as frames back to the
 //      dispatcher, which performs the actual Telegram API calls.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, appendFileSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+
+const LOG_PATH = process.env.TRD_CHANNEL_LOG ?? "/tmp/trd-channel.log";
+
+function log(label: string, data?: unknown): void {
+  const ts = new Date().toISOString();
+  const line = data !== undefined
+    ? `[${ts}] ${label} ${JSON.stringify(data)}`
+    : `[${ts}] ${label}`;
+  try { appendFileSync(LOG_PATH, line + "\n"); } catch { /* best-effort */ }
+}
 
 type RepoConfig = {
   instance_id: string;
@@ -83,10 +93,16 @@ const NOTIFY_METHOD =
   process.env.TRD_NOTIFY_METHOD ?? "notifications/claude/channel";
 const DISPATCHER = `ws://127.0.0.1:${cfg.dispatcher_port}/channel?secret=${encodeURIComponent(cfg.secret)}`;
 
+log("boot", { instance_id: cfg.instance_id, dispatcher_port: cfg.dispatcher_port, notify_method: NOTIFY_METHOD });
+
 let ws: WebSocket | null = null;
 let backoffMs = 500;
 const pendingDownloads = new Map<string, (f: DownloadResultFrame) => void>();
 const pendingTTS = new Map<string, (f: TTSResultFrame) => void>();
+
+// Gate: don't forward frames until the MCP handshake (tools/list) completes.
+let ready = false;
+const frameBuffer: AnyInbound[] = [];
 
 const server = new Server(
   { name: "trd-channel", version: "0.1.0" },
@@ -106,15 +122,17 @@ const server = new Server(
 );
 
 function connect(): void {
+  log("ws connect attempt", { url: DISPATCHER.replace(/secret=[^&]+/, "secret=***") });
   try {
     ws = new WebSocket(DISPATCHER);
   } catch (e) {
-    console.error("trd-channel: ws ctor failed:", e);
+    log("ws ctor failed", { error: String(e) });
     setTimeout(connect, backoffMs);
     backoffMs = Math.min(backoffMs * 2, 10_000);
     return;
   }
   ws.addEventListener("open", () => {
+    log("ws open; sending hello");
     backoffMs = 500;
     wsSend({ type: "hello", instance_id: cfg.instance_id });
   });
@@ -123,45 +141,50 @@ function connect(): void {
     try {
       frame = JSON.parse(String(ev.data));
     } catch (e) {
-      console.error("trd-channel: bad json from dispatcher:", e);
+      log("bad json from dispatcher", { error: String(e) });
+      return;
+    }
+    if (!ready) {
+      log("frame buffered (not ready)", { type: frame.type });
+      frameBuffer.push(frame);
       return;
     }
     onFrame(frame);
   });
-  ws.addEventListener("close", () => {
+  ws.addEventListener("close", (ev) => {
+    log("ws closed", { code: ev.code, reason: ev.reason });
     ws = null;
     setTimeout(connect, backoffMs);
     backoffMs = Math.min(backoffMs * 2, 10_000);
   });
   ws.addEventListener("error", (ev) => {
-    console.error("trd-channel: ws error:", (ev as Event).type);
+    log("ws error", { type: (ev as Event).type });
   });
 }
 
 function wsSend(obj: object): void {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    console.error(
-      "trd-channel: drop frame, ws not open:",
-      JSON.stringify(obj).slice(0, 200),
-    );
+    log("drop frame, ws not open", obj);
     return;
   }
   ws.send(JSON.stringify(obj));
 }
 
 function onFrame(frame: AnyInbound): void {
+  log("frame recv", { type: frame.type });
   if (frame.type === "message") {
     const m = frame as InboundFrame;
-    const tsIso = m.ts
+    log("message frame", { msg_id: m.message_id, from: m.user, text: m.text?.slice(0, 100) });
+    const tsIso = m.ts 
       ? new Date(m.ts * 1000).toISOString()
       : new Date().toISOString();
-    void server.notification({
+    const notify = {
       method: NOTIFY_METHOD,
       params: {
         content: m.text ?? "",
         meta: {
           source: "telegram",
-          chat_id: m.chat_id,
+          chat_id: String(m.chat_id),
           message_id: String(m.message_id),
           thread_id: String(m.thread_id),
           user: m.user ?? "",
@@ -174,6 +197,12 @@ function onFrame(frame: AnyInbound): void {
             : {}),
         },
       },
+    };
+    log("notification", notify);
+    server.notification(notify).then(() => {
+      log("notify sent", { method: NOTIFY_METHOD, msg_id: m.message_id });
+    }).catch((err: unknown) => {
+      log("notify FAILED", { method: NOTIFY_METHOD, msg_id: m.message_id, error: String(err) });
     });
     return;
   }
@@ -195,11 +224,19 @@ function onFrame(frame: AnyInbound): void {
     }
     return;
   }
-  console.error("trd-channel: unknown frame:", frame.type);
+  log("unknown frame type", { type: frame.type });
 }
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  if (!ready) {
+    ready = true;
+    log("ready (tools/list served)", { buffered: frameBuffer.length });
+    // TODO: we cannot call onFrame now, it will be before the tools results is returned.
+    // Put this onFrame loop in a delayed callback (50ms timeout or such)
+    const queued = frameBuffer.splice(0);
+    for (const f of queued) onFrame(f);
+  }
+  return { tools: [
     {
       name: "reply",
       description:
@@ -272,7 +309,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
   ],
-}));
+}; });
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: args = {} } = req.params;
@@ -358,15 +395,75 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 });
 
-connect();
 const transport = new StdioServerTransport();
+transport.onerror = (err) => {
+  log("transport ERROR", { error: String(err), stack: err?.stack });
+};
+transport.onclose = () => {
+  log("transport CLOSED");
+};
+server.onerror = (err) => {
+  log("server ERROR", { error: String(err), stack: (err as Error)?.stack });
+};
+server.onclose = () => {
+  log("server CLOSED (MCP session ended)");
+};
 await server.connect(transport);
+log("mcp transport connected");
+
+// Log stdin after transport is wired — additive listener, no monkey-patching.
+process.stdin.on("data", (chunk: Buffer) => {
+  log("stdin DATA", { bytes: chunk.length, text: chunk.toString().slice(0, 500) });
+});
+
+connect();
+
+// --- Exit diagnostics ---
+// When Claude Code closes the MCP connection, stdin gets EOF. Without
+// explicit handling the process may die silently — add full lifecycle logging.
+
+function shutdown(reason: string): void {
+  log("shutdown", { reason });
+  try { ws?.close(); } catch { /* ignore */ }
+  setTimeout(() => process.exit(0), 1000);
+}
+
+process.stdin.on("end", () => {
+  log("stdin END (Claude Code closed MCP connection)");
+  shutdown("stdin end");
+});
+process.stdin.on("close", () => {
+  log("stdin CLOSE");
+  shutdown("stdin close");
+});
+
+process.on("exit", (code) => {
+  // Synchronous-only — last chance to log before death.
+  const ts = new Date().toISOString();
+  try {
+    appendFileSync(LOG_PATH, `[${ts}] process.exit code=${code}\n`);
+  } catch { /* best-effort */ }
+});
+
+process.on("SIGTERM", () => {
+  log("SIGTERM received");
+  shutdown("SIGTERM");
+});
+
+process.on("SIGHUP", () => {
+  log("SIGHUP received");
+  shutdown("SIGHUP");
+});
+
+process.on("unhandledRejection", (err) => {
+  log("UNHANDLED REJECTION", { error: String(err), stack: (err as Error)?.stack });
+});
+
+process.on("uncaughtException", (err) => {
+  log("UNCAUGHT EXCEPTION", { error: String(err), stack: err?.stack });
+});
 
 process.on("SIGINT", () => {
-  try {
-    ws?.close();
-  } catch {
-    /* ignore */
-  }
-  process.exit(0);
+  log("SIGINT received");
+  shutdown("SIGINT");
 });
