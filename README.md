@@ -122,6 +122,7 @@ Inside a topic:
 | `/reset` | Relaunches tmux with a fresh conversation (clears history) |
 | `/status` | Shows tmux + channel connection state |
 | `/watch` | Captures the current tmux pane and replies with it |
+| `/debug` | Toggles debug mode — new Claude instances get `--debug` flag |
 | `/forget` | Deletes the mapping (keeps cloned files on disk) |
 
 Anything that's not a slash command gets forwarded to Claude in that topic.

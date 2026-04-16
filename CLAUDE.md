@@ -80,6 +80,58 @@ One JSON frame per WS message. Server→plugin types: `message`, `download_resul
 - The `channel/index.ts` `NOTIFY_METHOD` defaults to `claude/channel` — if Claude Code's channel notification method changes, this is the one knob to turn (or set `TRD_NOTIFY_METHOD` env var).
 - `writeMCPConfig` in `dispatcher.go` resolves the channel plugin command: `$TRD_CHANNEL_ENTRY` → `bun run <path>`, otherwise `trd-channel` (npm bin). Both paths need to keep working.
 
+## Debugging
+
+Three log sources to check when troubleshooting:
+
+### 1. TRD dispatcher logs
+
+The dispatcher logs to stderr and `~/.trd/trd.log`. View live via the tmux session:
+
+```bash
+tmux attach -t trd          # see live logs (Ctrl+B, D to detach)
+tail -f ~/.trd/trd.log      # or from another terminal
+```
+
+Start TRD in debug mode for verbose output:
+
+```bash
+trd start --debug            # or set TRD_DEBUG=1
+```
+
+Toggle debug mode at runtime from Telegram: send `/debug` in any topic.
+New/restarted Claude instances will include/omit the `--debug` flag accordingly.
+
+### 2. Channel plugin logs
+
+The MCP channel plugin logs to `/tmp/trd-channel.log`:
+
+```bash
+tail -f /tmp/trd-channel.log
+```
+
+Override with `TRD_CHANNEL_LOG` env var. Shows: WS connect/disconnect, frame
+send/recv, MCP notification delivery, tool calls.
+
+### 3. Claude Code debug logs
+
+Claude Code writes debug logs to `~/.claude/debug/`:
+
+```bash
+ls -lt ~/.claude/debug/       # most recent session first
+tail -100 ~/.claude/debug/<session-id>.txt
+```
+
+These show the MCP protocol from Claude's side — useful when the channel
+plugin connects but messages aren't getting through.
+
+### Quick debug checklist
+
+1. **Message not arriving?** Check `trd.log` for "tg recv" → "tg->claude forward" → "frame queued". If "no live channel", the plugin isn't connected.
+2. **Plugin not connecting?** Check `/tmp/trd-channel.log` for "ws connect" / "ws error". Verify `.trd/config.json` has the right port and secret.
+3. **Claude not responding?** Use `/watch` in the topic to see the tmux pane. Check for rate-limit prompts (the watchdog auto-dismisses these).
+4. **TTS/Whisper broken?** Check `trd.log` for "whisper:" or "tts" entries. Verify models exist in `~/.trd/models/`.
+
 ## Distribution
 
 npm package (`package.json` + `postinstall.js` + `bin/trd-shim.js`) ships four prebuilt Go binaries under `bin/trd-{os}-{arch}` and symlinks the matching one to `bin/trd`. `scripts/build-binaries.sh` produces them; `scripts/install.sh` is a prerequisite checker (check-and-prompt, never auto-sudo).

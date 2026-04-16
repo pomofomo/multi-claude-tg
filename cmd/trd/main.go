@@ -122,17 +122,19 @@ func cmdStart(args []string) {
 	fs := flag.NewFlagSet("start", flag.ExitOnError)
 	token := fs.String("telegram-token", os.Getenv("TELEGRAM_BOT_TOKEN"), "Telegram bot token")
 	port := fs.Int("port", envInt("TRD_PORT", 7777), "dispatcher HTTP/WS port")
+	debug := fs.Bool("debug", os.Getenv("TRD_DEBUG") == "1", "enable debug logging and pass --debug to Claude instances")
 	_ = fs.Parse(args)
 	if *token == "" {
 		fmt.Fprintln(os.Stderr, "--telegram-token is required (or set TELEGRAM_BOT_TOKEN)")
 		os.Exit(2)
 	}
 
-	logger := newLogger()
+	logger := newLogger(*debug)
 	d, err := dispatcher.New(dispatcher.Options{
 		TelegramToken:  *token,
 		Port:           *port,
 		Logger:         logger,
+		Debug:          *debug,
 		HealthInterval: time.Duration(envInt("TRD_HEALTH_INTERVAL_SEC", 30)) * time.Second,
 	})
 	if err != nil {
@@ -420,7 +422,7 @@ func envInt(key string, def int) int {
 	return n
 }
 
-func newLogger() *slog.Logger {
+func newLogger(debug bool) *slog.Logger {
 	logPath, _ := config.LogPath()
 	_ = os.MkdirAll(filepath.Dir(logPath), 0o700)
 	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
@@ -428,7 +430,11 @@ func newLogger() *slog.Logger {
 	if err == nil {
 		out = io.MultiWriter(os.Stderr, f)
 	}
-	return slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	level := slog.LevelInfo
+	if debug {
+		level = slog.LevelDebug
+	}
+	return slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: level}))
 }
 
 func shortTime(t time.Time) string { return t.UTC().Format("2006-01-02 15:04") }

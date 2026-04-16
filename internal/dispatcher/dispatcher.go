@@ -37,6 +37,8 @@ type Options struct {
 	// AttachDir is where downloaded Telegram attachments are written.
 	// Defaults to ~/.trd/attachments.
 	AttachDir string
+	// Debug enables verbose logging and passes --debug to Claude instances.
+	Debug bool
 }
 
 // Dispatcher glues the subsystems together.
@@ -510,6 +512,8 @@ func (d *Dispatcher) handleMessage(ctx context.Context, m *telegram.Message) {
 		d.cmdWatch(ctx, m)
 	case text == "/reset":
 		d.cmdReset(ctx, m)
+	case text == "/debug":
+		d.cmdDebug(ctx, m)
 	default:
 		d.routeToInstance(ctx, m, text)
 	}
@@ -690,6 +694,18 @@ func (d *Dispatcher) cmdReset(ctx context.Context, m *telegram.Message) {
 	inst.FailCount = 0
 	_ = d.store.Put(*inst)
 	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "reset — fresh conversation started")
+}
+
+func (d *Dispatcher) cmdDebug(ctx context.Context, m *telegram.Message) {
+	d.opts.Debug = !d.opts.Debug
+	state := "OFF"
+	if d.opts.Debug {
+		state = "ON"
+	}
+	d.logger.Info("debug mode toggled", "debug", d.opts.Debug)
+	d.sendText(ctx, m.Chat.ID, m.MessageThreadID,
+		fmt.Sprintf("Debug mode: %s. New/restarted Claude instances will %s --debug flag.",
+			state, map[bool]string{true: "include", false: "omit"}[d.opts.Debug]))
 }
 
 func (d *Dispatcher) cmdStatus(ctx context.Context, m *telegram.Message) {
@@ -930,8 +946,13 @@ func (d *Dispatcher) launchTmuxWithOpts(inst storage.Instance, resume bool) erro
 	}
 
 	claudeBin := firstNonEmpty(os.Getenv("TRD_CLAUDE_BIN"), "claude")
-	claudeArgs := firstNonEmpty(os.Getenv("TRD_CLAUDE_ARGS"),
-		"--debug --dangerously-skip-permissions --dangerously-load-development-channels server:trd-channel")
+	claudeArgs := os.Getenv("TRD_CLAUDE_ARGS")
+	if claudeArgs == "" {
+		claudeArgs = "--dangerously-skip-permissions --dangerously-load-development-channels server:trd-channel"
+		if d.opts.Debug {
+			claudeArgs = "--debug " + claudeArgs
+		}
+	}
 
 	// Resume the previous conversation by default. /reset starts fresh.
 	if resume {
