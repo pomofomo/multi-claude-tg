@@ -31,12 +31,11 @@ by how much each item matters to shipping a usable 0.1.
 ### Voice messages → Whisper transcription
 
 - [x] **Handle `m.Voice` and `m.Audio` in dispatcher.** Done in `d091fef`.
-- [ ] **Whisper transcription in the dispatcher.** When a voice/audio
-      attachment arrives, run it through Whisper (CLI or OpenAI API) and
-      send the transcript as the frame's `text`, with the original audio
-      path as an attachment. Configure via `TRD_WHISPER_CMD` or
-      `TRD_WHISPER_API_KEY` env var. If neither is set, forward the audio
-      as-is (like photos today).
+- [x] **Whisper transcription in the dispatcher.** Done: `internal/media`
+      package handles both CLI (`TRD_WHISPER_CMD`) and OpenAI API
+      (`TRD_OPENAI_API_KEY`) backends. Gracefully degrades when unconfigured.
+- [x] **Clean up whisper sidecar files.** Done: `transcribeAttachment`
+      removes `.txt`/`.vtt`/`.srt`/`.json`/`.tsv` artifacts after transcription.
 
 ### Attachment flow improvements
 
@@ -44,10 +43,9 @@ by how much each item matters to shipping a usable 0.1.
       and include a local `image_path` in the WS frame (mirroring the
       reference Telegram MCP plugin). Removes the two-step
       `download_attachment` dance Claude has to do today.
-- [ ] **Use `sendPhoto` / `sendVoice` for outbound media.** Currently all
-      outbound files go through `sendDocument`. Detect image/audio
-      extensions and use the appropriate Telegram method for inline display
-      and playback.
+- [x] **Use `sendPhoto` / `sendVoice` for outbound media.** Done:
+      dispatcher detects file extension and routes to `SendPhoto`,
+      `SendVoice`, or `SendAudio` accordingly.
 
 ### Install documentation
 
@@ -72,22 +70,17 @@ by how much each item matters to shipping a usable 0.1.
       `download_attachment`. The reference Telegram MCP plugin pre-fetches
       photos and exposes them as `image_path`. Mirror that so image-heavy
       conversations don't rely on the model remembering a two-step dance.
-- [ ] **Interim progress on `/start`.** Big repos clone in minutes; the
-      topic stays silent. Use `edit_message` to update the "Cloning …"
-      message with elapsed time or `git clone` stderr.
-- [ ] **`/logs` as a Telegram command.** `trd logs <prefix>` exists on the
-      CLI but there's no way to see the current tmux pane from inside the
-      topic. Add a `/logs` handler that calls `tmuxmgr.CapturePane`,
-      truncates, and replies.
-- [ ] **Dismissing Claude's dev-channels confirmation is fragile.** The
-      `sleep 3 ; tmux send-keys Enter` workaround (`launchTmux`) breaks
-      silently if the prompt changes or the session is slow. Detect the
-      prompt string with `tmux capture-pane` in a short loop instead of a
-      fixed sleep.
-- [ ] **`trd status` CLI can't see channel-connection state.** The
-      dispatcher knows which instances have live WS connections; the CLI
-      only knows tmux liveness. Expose a read-only admin endpoint
-      (`GET /admin/status` on `127.0.0.1`) so the CLI can surface this.
+- [x] **Interim progress on `/start`.** Done: clone message is edited
+      every 10s with elapsed time while `git clone` runs.
+- [x] **`/watch` Telegram command (was `/logs`).** Done: `/watch` in a
+      topic calls `tmuxmgr.CapturePane` and replies with the pane content.
+      CLI renamed from `trd logs` to `trd watch` (`logs` kept as alias).
+- [x] **Dismissing Claude's dev-channels confirmation is fragile.** Done:
+      replaced `sleep+send-keys` shell hack with `autoConfirm` goroutine
+      that polls `capture-pane` for a prompt (up to 30s, 500ms interval).
+- [x] **`trd status` CLI shows channel-connection state.** Done:
+      `/api/instances` now returns `connected` and `tmux_alive` fields.
+      CLI `trd status` displays `channel=true/false`.
 
 ## P4 — release & ops
 
@@ -114,11 +107,10 @@ by how much each item matters to shipping a usable 0.1.
 
 ## Nice-to-fix drive-bys
 
-- [ ] `cmd/trd/main.go` re-implements `strings.HasPrefix` as `startsWith`
-      and a tiny `stringReader` instead of `strings.NewReader`. Replace
-      with stdlib helpers.
+- [x] `cmd/trd/main.go` stdlib cleanup. Done: removed `dirOf` (replaced
+      with `filepath.Dir`), inlined `asReader` as `strings.NewReader`.
 - [ ] `dispatcher.preview` / `truncate` / `shortID` could move to a
-      tiny `internal/logutil` so `cmd/trd` can reuse them.
-- [ ] `writeMCPConfig` builds JSON with `fmt.Sprintf` + `json.Marshal` for
-      the args array; switch to a single `json.MarshalIndent` of a struct
-      for clarity.
+      tiny `internal/logutil` so `cmd/trd` can reuse them. (No actual
+      duplication exists today — deferred until needed.)
+- [x] `writeMCPConfig` uses `json.MarshalIndent` of a struct. Already
+      done in a prior commit.

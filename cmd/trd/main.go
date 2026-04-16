@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -30,7 +31,7 @@ Usage:
   trd status
   trd list
   trd stop  <name-or-prefix>
-  trd logs  <name-or-prefix>
+  trd watch <name-or-prefix>
   trd shell <name-or-prefix>
   trd cd    <name-or-prefix>
 
@@ -56,8 +57,8 @@ func main() {
 		cmdStatus(args)
 	case "stop":
 		cmdStop(args)
-	case "logs":
-		cmdLogs(args)
+	case "watch", "logs":
+		cmdWatch(args)
 	case "shell":
 		cmdShell(args)
 	case "cd":
@@ -104,9 +105,16 @@ func cmdStart(args []string) {
 	logger.Info("trd stopped")
 }
 
+// instanceInfo mirrors dispatcher.InstanceInfo for decoding the API response.
+type instanceInfo struct {
+	storage.Instance
+	Connected bool `json:"connected"`
+	TmuxAlive bool `json:"tmux_alive"`
+}
+
 // allInstances tries the running dispatcher's HTTP API first, then falls back
 // to opening the bbolt DB directly (which only works when the server is stopped).
-func allInstances() ([]storage.Instance, error) {
+func allInstances() ([]instanceInfo, error) {
 	port := envInt("TRD_PORT", 7777)
 	url := fmt.Sprintf("http://127.0.0.1:%d/api/instances", port)
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -114,7 +122,7 @@ func allInstances() ([]storage.Instance, error) {
 	if err == nil {
 		defer resp.Body.Close()
 		if resp.StatusCode == http.StatusOK {
-			var instances []storage.Instance
+			var instances []instanceInfo
 			if err := json.NewDecoder(resp.Body).Decode(&instances); err == nil {
 				return instances, nil
 			}
@@ -130,7 +138,15 @@ func allInstances() ([]storage.Instance, error) {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	defer store.Close()
-	return store.All()
+	all, err := store.All()
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]instanceInfo, len(all))
+	for i, inst := range all {
+		infos[i] = instanceInfo{Instance: inst}
+	}
+	return infos, nil
 }
 
 func cmdStatus(args []string) {
@@ -145,14 +161,18 @@ func cmdStatus(args []string) {
 		return
 	}
 	for _, inst := range all {
-		alive := tmuxmgr.HasSession(tmuxmgr.SessionName(inst.InstanceID))
+		alive := inst.TmuxAlive
+		if !alive {
+			// Fallback for direct-DB path where TmuxAlive isn't populated.
+			alive = tmuxmgr.HasSession(tmuxmgr.SessionName(inst.InstanceID))
+		}
 		name := inst.RepoName
 		if name == "" {
 			name = storage.RepoNameFromURL(inst.RepoURL)
 		}
-		fmt.Printf("%-20s %s  %s  state=%-8s tmux=%v  %s\n",
+		fmt.Printf("%-20s %s  %s  state=%-8s tmux=%v  channel=%v  %s\n",
 			name, inst.InstanceID[:8], shortTime(inst.CreatedAt),
-			inst.State, alive, inst.RepoURL)
+			inst.State, alive, inst.Connected, inst.RepoURL)
 	}
 }
 
@@ -212,13 +232,12 @@ func cmdStop(args []string) {
 	fmt.Println("stopped", inst.InstanceID[:8])
 }
 
-func cmdLogs(args []string) {
+func cmdWatch(args []string) {
 	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: trd logs <instance-prefix>")
+		fmt.Fprintln(os.Stderr, "usage: trd watch <name-or-prefix>")
 		os.Exit(2)
 	}
-	prefix := args[0]
-	inst, err := findInstance(prefix)
+	inst, err := findInstance(args[0])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -228,16 +247,16 @@ func cmdLogs(args []string) {
 		fmt.Fprintln(os.Stderr, "capture-pane:", err)
 		os.Exit(1)
 	}
-	_, _ = io.Copy(os.Stdout, asReader(out))
+	_, _ = io.Copy(os.Stdout, strings.NewReader(out))
 }
 
-func findInstance(query string) (*storage.Instance, error) {
+func findInstance(query string) (*instanceInfo, error) {
 	all, err := allInstances()
 	if err != nil {
 		return nil, err
 	}
 	// First pass: match on repo name (exact or prefix).
-	var byName []storage.Instance
+	var byName []instanceInfo
 	for _, inst := range all {
 		name := inst.RepoName
 		if name == "" {
@@ -254,7 +273,7 @@ func findInstance(query string) (*storage.Instance, error) {
 		return nil, fmt.Errorf("%d instances match repo name %q — use a longer prefix or instance ID", len(byName), query)
 	}
 	// Second pass: match on instance ID prefix.
-	var byID []storage.Instance
+	var byID []instanceInfo
 	for _, inst := range all {
 		if strings.HasPrefix(inst.InstanceID, query) {
 			byID = append(byID, inst)
@@ -284,7 +303,7 @@ func envInt(key string, def int) int {
 
 func newLogger() *slog.Logger {
 	logPath, _ := config.LogPath()
-	_ = os.MkdirAll(dirOf(logPath), 0o700)
+	_ = os.MkdirAll(filepath.Dir(logPath), 0o700)
 	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	var out io.Writer = os.Stderr
 	if err == nil {
@@ -293,15 +312,4 @@ func newLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelInfo}))
 }
 
-func dirOf(path string) string {
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == '/' {
-			return path[:i]
-		}
-	}
-	return "."
-}
-
 func shortTime(t time.Time) string { return t.UTC().Format("2006-01-02 15:04") }
-
-func asReader(s string) io.Reader { return strings.NewReader(s) }

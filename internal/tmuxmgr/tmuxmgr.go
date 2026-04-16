@@ -53,3 +53,13 @@ func CapturePane(name string) (string, error) {
 	}
 	return string(out), nil
 }
+
+// SendKeys sends keystrokes to a tmux session's active pane.
+func SendKeys(name string, keys ...string) error {
+	args := append([]string{"send-keys", "-t", name}, keys...)
+	out, err := exec.Command("tmux", args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("tmux send-keys failed: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}

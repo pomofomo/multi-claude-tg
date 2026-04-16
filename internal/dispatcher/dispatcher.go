@@ -62,6 +62,14 @@ type liveConn struct {
 	inbound chan ws.Frame // dispatcher -> plugin
 }
 
+// InstanceInfo is the enriched instance data returned by the API, adding
+// runtime state (WS connection, tmux liveness) to the stored Instance.
+type InstanceInfo struct {
+	storage.Instance
+	Connected bool `json:"connected"`
+	TmuxAlive bool `json:"tmux_alive"`
+}
+
 // New builds a Dispatcher, opening the DB and constructing the WS server.
 func New(opts Options) (*Dispatcher, error) {
 	if opts.Logger == nil {
@@ -281,13 +289,25 @@ func (d *Dispatcher) sendTo(instanceID string, frame ws.Frame) {
 	}
 }
 
-// ListInstances returns all instances as JSON for the CLI API endpoint.
+// ListInstances returns all instances as JSON for the CLI API endpoint,
+// enriched with runtime WS connection and tmux liveness state.
 func (d *Dispatcher) ListInstances() ([]byte, error) {
 	all, err := d.store.All()
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(all)
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	infos := make([]InstanceInfo, len(all))
+	for i, inst := range all {
+		_, connected := d.conns[inst.InstanceID]
+		infos[i] = InstanceInfo{
+			Instance:  inst,
+			Connected: connected,
+			TmuxAlive: tmuxmgr.HasSession(tmuxmgr.SessionName(inst.InstanceID)),
+		}
+	}
+	return json.Marshal(infos)
 }
 
 // --- Telegram long-poll and command handling ---
@@ -411,6 +431,8 @@ func (d *Dispatcher) handleMessage(ctx context.Context, m *telegram.Message) {
 		d.cmdStatus(ctx, m)
 	case text == "/forget":
 		d.cmdForget(ctx, m)
+	case text == "/watch":
+		d.cmdWatch(ctx, m)
 	default:
 		d.routeToInstance(ctx, m, text)
 	}
@@ -456,13 +478,48 @@ func (d *Dispatcher) cmdStart(ctx context.Context, m *telegram.Message, repoURL 
 	reposDir, _ := config.ReposDir()
 	repoPath := filepath.Join(reposDir, instID)
 
-	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "Cloning "+repoURL+"…")
+	sent, _ := d.tg.SendMessage(ctx, telegram.SendMessageParams{
+		ChatID:          m.Chat.ID,
+		MessageThreadID: m.MessageThreadID,
+		Text:            "Cloning " + repoURL + "…",
+	})
+
 	cloneCtx, cloneCancel := context.WithTimeout(ctx, 5*time.Minute)
-	out, err := exec.CommandContext(cloneCtx, "git", "clone", repoURL, repoPath).CombinedOutput()
+	cloneDone := make(chan struct{})
+	var cloneOut []byte
+	var cloneErr error
+	go func() {
+		cloneOut, cloneErr = exec.CommandContext(cloneCtx, "git", "clone", repoURL, repoPath).CombinedOutput()
+		close(cloneDone)
+	}()
+
+	// Update progress message every 10s while clone runs.
+	if sent.MessageID != 0 {
+		start := time.Now()
+		ticker := time.NewTicker(10 * time.Second)
+	loop:
+		for {
+			select {
+			case <-cloneDone:
+				break loop
+			case <-ticker.C:
+				elapsed := time.Since(start).Truncate(time.Second)
+				_ = d.tg.EditMessageText(ctx, telegram.EditMessageTextParams{
+					ChatID:    m.Chat.ID,
+					MessageID: sent.MessageID,
+					Text:      fmt.Sprintf("Cloning %s… (%s elapsed)", repoURL, elapsed),
+				})
+			}
+		}
+		ticker.Stop()
+	} else {
+		<-cloneDone
+	}
 	cloneCancel()
-	if err != nil {
+
+	if cloneErr != nil {
 		_ = os.RemoveAll(repoPath)
-		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "clone failed:\n"+truncate(string(out), 1500))
+		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "clone failed:\n"+truncate(string(cloneOut), 1500))
 		return
 	}
 
@@ -568,6 +625,24 @@ func (d *Dispatcher) cmdForget(ctx context.Context, m *telegram.Message) {
 		return
 	}
 	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "forgotten. repo files at "+inst.RepoPath+" kept on disk.")
+}
+
+func (d *Dispatcher) cmdWatch(ctx context.Context, m *telegram.Message) {
+	inst, _ := d.store.ByTopic(m.Chat.ID, m.MessageThreadID)
+	if inst == nil {
+		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "no instance bound to this topic")
+		return
+	}
+	out, err := tmuxmgr.CapturePane(tmuxmgr.SessionName(inst.InstanceID))
+	if err != nil {
+		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "capture failed: "+err.Error())
+		return
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		out = "(empty pane)"
+	}
+	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, truncate(out, 4000))
 }
 
 // routeToInstance forwards a non-command message to the bound instance's channel plugin.
@@ -709,6 +784,7 @@ func (d *Dispatcher) sendFileSmartly(ctx context.Context, chatID int64, threadID
 
 // transcribeAttachment downloads a Telegram file and runs Whisper on it.
 // Returns the transcript, or empty string on any failure (logged but not fatal).
+// Cleans up sidecar files (.txt, .vtt, .srt, .json) that whisper CLI may create.
 func (d *Dispatcher) transcribeAttachment(ctx context.Context, fileID string) string {
 	path, err := d.tg.DownloadFile(ctx, fileID, d.opts.AttachDir)
 	if err != nil {
@@ -719,6 +795,14 @@ func (d *Dispatcher) transcribeAttachment(ctx context.Context, fileID string) st
 	if err != nil {
 		d.logger.Warn("whisper: transcription failed", "path", path, "err", err)
 		return ""
+	}
+	// Whisper CLI writes sidecar files (e.g. file.txt alongside file.ogg). Clean them up.
+	base := strings.TrimSuffix(path, filepath.Ext(path))
+	for _, ext := range []string{".txt", ".vtt", ".srt", ".json", ".tsv"} {
+		sidecar := base + ext
+		if err := os.Remove(sidecar); err == nil {
+			d.logger.Debug("whisper: cleaned up sidecar", "path", sidecar)
+		}
 	}
 	d.logger.Info("whisper: transcribed", "path", path, "len", len(transcript))
 	return transcript
@@ -738,32 +822,60 @@ func (d *Dispatcher) launchTmux(inst storage.Instance) error {
 		"TRD_INSTANCE_ID=" + inst.InstanceID,
 	}
 
-	// Claude's `--dangerously-load-development-channels` authorizes named MCP
-	// servers to send channel notifications. The argument must match the server
-	// name in .mcp.json ("server:trd-channel").
-	// It may show an interactive prompt; we auto-dismiss it by sending keystrokes
-	// a few seconds after session creation.
-	delay := firstNonEmpty(os.Getenv("TRD_CLAUDE_CONFIRM_DELAY"), "3")
-	keys := firstNonEmpty(os.Getenv("TRD_CLAUDE_CONFIRM_KEYS"), "Enter")
 	claudeBin := firstNonEmpty(os.Getenv("TRD_CLAUDE_BIN"), "claude")
 	claudeArgs := firstNonEmpty(os.Getenv("TRD_CLAUDE_ARGS"),
-	"--debug --dangerously-skip-permissions --dangerously-load-development-channels server:trd-channel")
+		"--debug --dangerously-skip-permissions --dangerously-load-development-channels server:trd-channel")
 
-	// The channel plugin is discovered via the repo's .mcp.json we wrote at clone time.
-	// Background a confirm-sender that runs inside the same tmux server; if
-	// keys is empty, skip entirely.
-	var cmd string
-	if keys == "" {
-		cmd = fmt.Sprintf("%s %s", claudeBin, claudeArgs)
-	} else {
-		cmd = fmt.Sprintf("(sleep %s; tmux send-keys -t %s %s) & exec %s %s",
-			delay, name, keys, claudeBin, claudeArgs)
-	}
+	cmd := fmt.Sprintf("%s %s", claudeBin, claudeArgs)
 	d.logger.Info("launchTmux",
 		"instance", shortID(inst.InstanceID), "session", name, "cwd", inst.RepoPath,
-		"confirm_delay", delay, "confirm_keys", keys,
 	)
-	return tmuxmgr.NewSession(name, inst.RepoPath, cmd, env)
+	if err := tmuxmgr.NewSession(name, inst.RepoPath, cmd, env); err != nil {
+		return err
+	}
+
+	// Auto-confirm the dev-channels prompt by detecting it in the pane
+	// instead of the old fragile sleep+send-keys approach.
+	keys := firstNonEmpty(os.Getenv("TRD_CLAUDE_CONFIRM_KEYS"), "Enter")
+	if keys != "" {
+		go d.autoConfirm(name, keys, inst.InstanceID)
+	}
+	return nil
+}
+
+// autoConfirm polls the tmux pane looking for a confirmation prompt and
+// sends keystrokes when it detects one. This replaces the old fragile
+// "sleep N; tmux send-keys Enter" shell workaround.
+func (d *Dispatcher) autoConfirm(sessionName, keys, instanceID string) {
+	const timeout = 30 * time.Second
+	const interval = 500 * time.Millisecond
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		time.Sleep(interval)
+		if !tmuxmgr.HasSession(sessionName) {
+			return
+		}
+		out, err := tmuxmgr.CapturePane(sessionName)
+		if err != nil {
+			continue
+		}
+		out = strings.TrimSpace(out)
+		if out == "" {
+			continue
+		}
+		// Look for a confirmation prompt on the last non-empty line.
+		lines := strings.Split(out, "\n")
+		last := strings.TrimSpace(lines[len(lines)-1])
+		if strings.Contains(last, "?") || strings.Contains(strings.ToLower(last), "y/n") {
+			d.logger.Info("autoConfirm: detected prompt, sending keys",
+				"instance", shortID(instanceID), "session", sessionName, "prompt", preview(last))
+			_ = tmuxmgr.SendKeys(sessionName, keys)
+			return
+		}
+	}
+	d.logger.Warn("autoConfirm: timed out without detecting prompt",
+		"instance", shortID(instanceID), "session", sessionName)
 }
 
 func firstNonEmpty(vals ...string) string {

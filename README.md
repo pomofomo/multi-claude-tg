@@ -107,6 +107,8 @@ Inside a topic:
 
 Anything that's not a slash command gets forwarded to Claude in that topic.
 
+**Note** When you start a repo fro the first time in a new topic, it will start claude in that directory for the first time. And you need to manually click approval. (This may get better soon)
+
 ## Local CLI
 
 All commands accept a **repo name** or **instance-ID prefix** as `<name>`.
