@@ -54,13 +54,51 @@ trd status                # see all instances
 trd watch <name>          # see what Claude is doing
 ```
 
-## Developing TRD itself
+## Developing TRD through Telegram (self-modify)
 
-TRD manages its own development nicely. You can `/start` this repo in a
-topic and have Claude modify TRD through Telegram. After changes:
+TRD can manage its own repo — you develop it through Telegram, using the
+very tool you're building. Here's how:
+
+### Step 1: Fork and /start
+
+1. Fork `pomofomo/multi-claude-tg` on GitHub (or use the original if you have push access).
+2. In your Telegram supergroup, create a topic for TRD development.
+3. Send `/start git@github.com:you/multi-claude-tg.git` in that topic.
+
+Claude is now running in a checkout of TRD at `~/.trd/repos/<instance-id>/`.
+
+### Step 2: Point TRD at the instance's channel plugin
+
+The problem: when Claude edits `channel/index.ts` in its checkout, those
+changes aren't reflected because `TRD_CHANNEL_ENTRY` still points to your
+original source checkout. Fix this:
 
 ```bash
-make restart              # rebuilds, restarts dispatcher, Claude instances reconnect
+make self-modify NAME=multi-claude-tg
+```
+
+This finds the instance by repo name, updates `TRD_CHANNEL_ENTRY` to point
+at the instance's `channel/index.ts`, saves it to the database, and restarts
+the dispatcher.
+
+### Step 3: Develop through Telegram
+
+Now when Claude modifies TRD's code through Telegram:
+- Go changes: tell Claude to run `make restart` — rebuilds the binary and
+  restarts the dispatcher. Channel plugins reconnect automatically.
+- Channel plugin changes: take effect on next dispatcher restart (the
+  channel entry now points at the instance's checkout).
+
+### The flow
+
+```
+You (Telegram) → TRD → Claude in topic
+                          ↓
+                  Edits TRD source code
+                          ↓
+                  Runs `make restart`
+                          ↓
+                  New binary, same Claude sessions
 ```
 
 See [README.md](./README.md) for full documentation and [TODO.md](./TODO.md)

@@ -1,4 +1,4 @@
-.PHONY: build build-all install restart setup start test tidy clean install-deps lint
+.PHONY: build build-all install restart setup start self-modify test tidy clean install-deps lint
 
 GO ?= go
 
@@ -37,6 +37,28 @@ setup: install
 	@echo ""
 	@echo "Your token and channel path are saved in the database."
 	@echo "Future restarts need no env vars — just: make start"
+
+# Point TRD's channel plugin at an instance's checkout so self-edits take effect.
+# Usage: make self-modify NAME=multi-claude-tg
+self-modify: install
+	@if [ -z "$(NAME)" ]; then \
+		echo "Usage: make self-modify NAME=<instance-name>"; \
+		echo "Run 'trd list' to see instance names."; \
+		exit 1; \
+	fi
+	$(eval REPO_PATH := $(shell trd cd $(NAME) 2>/dev/null))
+	@if [ -z "$(REPO_PATH)" ]; then \
+		echo "Instance '$(NAME)' not found. Run 'trd list' to see available instances."; \
+		exit 1; \
+	fi
+	@echo "Updating TRD_CHANNEL_ENTRY to $(REPO_PATH)/channel/index.ts"
+	tmux send-keys -t trd C-c 2>/dev/null || true
+	sleep 1
+	tmux send-keys -t trd "export TRD_CHANNEL_ENTRY=$(REPO_PATH)/channel/index.ts" Enter
+	tmux send-keys -t trd 'trd start' Enter
+	@echo ""
+	@echo "Done. TRD now uses the channel plugin from instance '$(NAME)'."
+	@echo "Changes to channel/index.ts in that checkout take effect on next restart."
 
 # Start trd (reads saved config from database — no env vars needed after setup).
 start: install
