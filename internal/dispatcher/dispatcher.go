@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/pomofomo/multi-claude-tg/internal/config"
+	"github.com/pomofomo/multi-claude-tg/internal/media"
 	"github.com/pomofomo/multi-claude-tg/internal/storage"
 	"github.com/pomofomo/multi-claude-tg/internal/telegram"
 	"github.com/pomofomo/multi-claude-tg/internal/tmuxmgr"
@@ -45,6 +46,7 @@ type Dispatcher struct {
 	tg     *telegram.Client
 	store  *storage.Store
 	server *ws.Server
+	media  media.Config
 
 	// live WS conns keyed by instance_id.
 	mu    sync.RWMutex
@@ -94,11 +96,13 @@ func New(opts Options) (*Dispatcher, error) {
 		return nil, err
 	}
 
+	mediaCfg := media.ConfigFromEnv()
 	d := &Dispatcher{
 		opts:    opts,
 		logger:  opts.Logger,
 		tg:      telegram.New(opts.TelegramToken),
 		store:   store,
+		media:   mediaCfg,
 		conns:   map[string]*liveConn{},
 		pending: map[string]chan ws.Frame{},
 	}
@@ -179,10 +183,8 @@ func (d *Dispatcher) OnOutbound(instanceID string, frame ws.Frame) {
 			}
 		}
 		for _, path := range frame.Files {
-			if _, err := d.tg.SendDocument(ctx, chatID, threadID, path, ""); err != nil {
-				d.logger.Warn("tg sendDocument failed", "instance", shortID(instanceID), "path", path, "err", err)
-			} else {
-				d.logger.Info("tg sendDocument ok", "instance", shortID(instanceID), "path", path)
+			if err := d.sendFileSmartly(ctx, chatID, threadID, path, instanceID); err != nil {
+				d.logger.Warn("tg send file failed", "instance", shortID(instanceID), "path", path, "err", err)
 			}
 		}
 	case "react":
@@ -219,6 +221,35 @@ func (d *Dispatcher) OnOutbound(instanceID string, frame ws.Frame) {
 			d.logger.Info("tg downloadFile ok", "instance", shortID(instanceID), "path", path)
 		}
 		d.sendTo(instanceID, resp)
+	case "tts":
+		d.logger.Info("claude->tg tts",
+			"instance", shortID(instanceID), "text_len", len(frame.Text),
+		)
+		inst, _ := d.store.Get(instanceID)
+		if inst == nil {
+			d.logger.Warn("tts for unknown instance", "instance", instanceID)
+			d.sendTo(instanceID, ws.Frame{Type: "tts_result", ReqID: frame.ReqID, Err: "unknown instance"})
+			return
+		}
+		if !d.media.CanSynthesize() {
+			errMsg := "TTS not configured. Set TRD_TTS_CMD (e.g. kokoro) or TRD_OPENAI_API_KEY."
+			d.logger.Warn("tts not configured", "instance", shortID(instanceID))
+			d.sendTo(instanceID, ws.Frame{Type: "tts_result", ReqID: frame.ReqID, Err: errMsg})
+			return
+		}
+		audioPath, err := d.media.Synthesize(ctx, frame.Text, d.opts.AttachDir)
+		if err != nil {
+			d.logger.Warn("tts synthesis failed", "instance", shortID(instanceID), "err", err)
+			d.sendTo(instanceID, ws.Frame{Type: "tts_result", ReqID: frame.ReqID, Err: err.Error()})
+			return
+		}
+		if _, err := d.tg.SendVoice(ctx, inst.ChatID, inst.TopicID, audioPath, ""); err != nil {
+			d.logger.Warn("tg sendVoice failed", "instance", shortID(instanceID), "err", err)
+			d.sendTo(instanceID, ws.Frame{Type: "tts_result", ReqID: frame.ReqID, Err: err.Error()})
+		} else {
+			d.logger.Info("tg sendVoice ok", "instance", shortID(instanceID), "path", audioPath)
+			d.sendTo(instanceID, ws.Frame{Type: "tts_result", ReqID: frame.ReqID, Path: audioPath})
+		}
 	case "hello":
 		d.logger.Info("channel hello", "instance", shortID(instanceID), "claims", shortID(frame.InstanceID))
 	default:
@@ -575,9 +606,19 @@ func (d *Dispatcher) routeToInstance(ctx context.Context, m *telegram.Message, t
 	} else if m.Voice != nil {
 		frame.AttachmentFileID = m.Voice.FileID
 		frame.AttachmentName = "voice.ogg"
+		if d.media.CanTranscribe() {
+			if transcript := d.transcribeAttachment(ctx, m.Voice.FileID); transcript != "" {
+				frame.Text = transcript
+			}
+		}
 	} else if m.Audio != nil {
 		frame.AttachmentFileID = m.Audio.FileID
 		frame.AttachmentName = m.Audio.FileName
+		if d.media.CanTranscribe() {
+			if transcript := d.transcribeAttachment(ctx, m.Audio.FileID); transcript != "" {
+				frame.Text = transcript
+			}
+		}
 	}
 	d.mu.RLock()
 	_, connected := d.conns[inst.InstanceID]
@@ -626,6 +667,52 @@ func (d *Dispatcher) handleEditedMessage(_ context.Context, m *telegram.Message)
 		TS:        m.Date,
 	}
 	d.sendTo(inst.InstanceID, frame)
+}
+
+// sendFileSmartly picks the best Telegram send method based on file extension.
+func (d *Dispatcher) sendFileSmartly(ctx context.Context, chatID int64, threadID int, path, instanceID string) error {
+	ext := strings.ToLower(filepath.Ext(path))
+	var err error
+	switch ext {
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp":
+		_, err = d.tg.SendPhoto(ctx, chatID, threadID, path, "")
+		if err == nil {
+			d.logger.Info("tg sendPhoto ok", "instance", shortID(instanceID), "path", path)
+		}
+	case ".ogg", ".oga", ".opus":
+		_, err = d.tg.SendVoice(ctx, chatID, threadID, path, "")
+		if err == nil {
+			d.logger.Info("tg sendVoice ok", "instance", shortID(instanceID), "path", path)
+		}
+	case ".mp3", ".m4a", ".wav", ".flac", ".aac":
+		_, err = d.tg.SendAudio(ctx, chatID, threadID, path, "")
+		if err == nil {
+			d.logger.Info("tg sendAudio ok", "instance", shortID(instanceID), "path", path)
+		}
+	default:
+		_, err = d.tg.SendDocument(ctx, chatID, threadID, path, "")
+		if err == nil {
+			d.logger.Info("tg sendDocument ok", "instance", shortID(instanceID), "path", path)
+		}
+	}
+	return err
+}
+
+// transcribeAttachment downloads a Telegram file and runs Whisper on it.
+// Returns the transcript, or empty string on any failure (logged but not fatal).
+func (d *Dispatcher) transcribeAttachment(ctx context.Context, fileID string) string {
+	path, err := d.tg.DownloadFile(ctx, fileID, d.opts.AttachDir)
+	if err != nil {
+		d.logger.Warn("whisper: download failed", "file_id", fileID, "err", err)
+		return ""
+	}
+	transcript, err := d.media.Transcribe(ctx, path)
+	if err != nil {
+		d.logger.Warn("whisper: transcription failed", "path", path, "err", err)
+		return ""
+	}
+	d.logger.Info("whisper: transcribed", "path", path, "len", len(transcript))
+	return transcript
 }
 
 // --- internals ---

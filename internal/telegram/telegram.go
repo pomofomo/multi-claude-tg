@@ -235,8 +235,9 @@ func (c *Client) SetReaction(ctx context.Context, chatID int64, messageID int, e
 	return err
 }
 
-// SendDocument uploads a file and sends it as a document.
-func (c *Client) SendDocument(ctx context.Context, chatID int64, threadID int, path string, caption string) (Message, error) {
+// sendFile is a shared helper for sendDocument/sendPhoto/sendVoice/sendAudio.
+// fieldName is the multipart field ("document", "photo", "voice", "audio").
+func (c *Client) sendFile(ctx context.Context, method, fieldName string, chatID int64, threadID int, path, caption string) (Message, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return Message{}, err
@@ -252,7 +253,7 @@ func (c *Client) SendDocument(ctx context.Context, chatID int64, threadID int, p
 	if caption != "" {
 		_ = mw.WriteField("caption", caption)
 	}
-	fw, err := mw.CreateFormFile("document", filepath.Base(path))
+	fw, err := mw.CreateFormFile(fieldName, filepath.Base(path))
 	if err != nil {
 		return Message{}, err
 	}
@@ -263,7 +264,7 @@ func (c *Client) SendDocument(ctx context.Context, chatID int64, threadID int, p
 		return Message{}, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url("sendDocument"), &buf)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url(method), &buf)
 	if err != nil {
 		return Message{}, err
 	}
@@ -279,12 +280,32 @@ func (c *Client) SendDocument(ctx context.Context, chatID int64, threadID int, p
 	}
 	var parsed apiResp[Message]
 	if err := json.Unmarshal(data, &parsed); err != nil {
-		return Message{}, fmt.Errorf("decode sendDocument: %w (body=%s)", err, string(data))
+		return Message{}, fmt.Errorf("decode %s: %w (body=%s)", method, err, string(data))
 	}
 	if !parsed.OK {
-		return Message{}, fmt.Errorf("telegram sendDocument: %s", parsed.Description)
+		return Message{}, fmt.Errorf("telegram %s: %s", method, parsed.Description)
 	}
 	return parsed.Result, nil
+}
+
+// SendDocument uploads a file and sends it as a document.
+func (c *Client) SendDocument(ctx context.Context, chatID int64, threadID int, path string, caption string) (Message, error) {
+	return c.sendFile(ctx, "sendDocument", "document", chatID, threadID, path, caption)
+}
+
+// SendPhoto uploads and sends a photo (inline display in Telegram).
+func (c *Client) SendPhoto(ctx context.Context, chatID int64, threadID int, path string, caption string) (Message, error) {
+	return c.sendFile(ctx, "sendPhoto", "photo", chatID, threadID, path, caption)
+}
+
+// SendVoice uploads and sends a voice message (OGG/Opus, inline playback).
+func (c *Client) SendVoice(ctx context.Context, chatID int64, threadID int, path string, caption string) (Message, error) {
+	return c.sendFile(ctx, "sendVoice", "voice", chatID, threadID, path, caption)
+}
+
+// SendAudio uploads and sends an audio file (MP3, etc., with player UI).
+func (c *Client) SendAudio(ctx context.Context, chatID int64, threadID int, path string, caption string) (Message, error) {
+	return c.sendFile(ctx, "sendAudio", "audio", chatID, threadID, path, caption)
 }
 
 // fileInfo is what getFile returns.

@@ -45,9 +45,17 @@ type DownloadResultFrame = {
   error?: string;
 };
 
+type TTSResultFrame = {
+  type: "tts_result";
+  req_id: string;
+  path?: string;
+  error?: string;
+};
+
 type AnyInbound =
   | InboundFrame
   | DownloadResultFrame
+  | TTSResultFrame
   | { type: string; [k: string]: unknown };
 
 const CONFIG_PATH = process.env.TRD_CONFIG ?? process.env.CLAUDE_TRD_CONFIG;
@@ -78,6 +86,7 @@ const DISPATCHER = `ws://127.0.0.1:${cfg.dispatcher_port}/channel?secret=${encod
 let ws: WebSocket | null = null;
 let backoffMs = 500;
 const pendingDownloads = new Map<string, (f: DownloadResultFrame) => void>();
+const pendingTTS = new Map<string, (f: TTSResultFrame) => void>();
 
 const server = new Server(
   { name: "trd-channel", version: "0.1.0" },
@@ -177,6 +186,15 @@ function onFrame(frame: AnyInbound): void {
     }
     return;
   }
+  if (frame.type === "tts_result") {
+    const t = frame as TTSResultFrame;
+    const cb = pendingTTS.get(t.req_id);
+    if (cb) {
+      pendingTTS.delete(t.req_id);
+      cb(t);
+    }
+    return;
+  }
   console.error("trd-channel: unknown frame:", frame.type);
 }
 
@@ -239,6 +257,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["file_id"],
       },
     },
+    {
+      name: "send_voice",
+      description:
+        "Synthesize text to speech and send as a Telegram voice message. " +
+        "Requires TRD_TTS_CMD (e.g. kokoro) or TRD_OPENAI_API_KEY on the dispatcher. " +
+        "Returns an error if TTS is not configured.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          text: { type: "string", description: "The text to speak" },
+        },
+        required: ["text"],
+      },
+    },
   ],
 }));
 
@@ -295,6 +327,28 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         };
       }
       return { content: [{ type: "text", text: result.path ?? "" }] };
+    }
+    case "send_voice": {
+      const reqId = `tts-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const text = String(a.text ?? "");
+      const result = await new Promise<TTSResultFrame>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingTTS.delete(reqId);
+          reject(new Error("TTS timed out after 120s"));
+        }, 120_000);
+        pendingTTS.set(reqId, (f) => {
+          clearTimeout(timer);
+          resolve(f);
+        });
+        wsSend({ type: "tts", text, req_id: reqId });
+      });
+      if (result.error) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: `TTS failed: ${result.error}` }],
+        };
+      }
+      return { content: [{ type: "text", text: `voice message sent` }] };
     }
     default:
       return {

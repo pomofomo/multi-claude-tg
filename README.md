@@ -142,6 +142,35 @@ You type in Topic:backend
   ↳ trd sendMessage to Telegram with message_thread_id
 ```
 
+## Optional: voice messages & TTS
+
+TRD can transcribe incoming voice messages (Whisper) and send spoken replies (TTS).
+Both are **optional** — if not configured, voice messages are forwarded as audio
+attachments and the `send_voice` tool returns a clear error.
+
+| Feature | Env var | Example |
+|---------|---------|---------|
+| **Whisper (CLI)** | `TRD_WHISPER_CMD` | `whisper --model base --output_format txt` |
+| **TTS (CLI)** | `TRD_TTS_CMD` | `kokoro` (receives text file + output path as args) |
+| **OpenAI API** (both) | `TRD_OPENAI_API_KEY` | `sk-...` — used for Whisper and/or TTS when CLI not set |
+| TTS voice | `TRD_TTS_VOICE` | `alloy` (default, OpenAI only) |
+| TTS model | `TRD_TTS_MODEL` | `tts-1` (default, OpenAI only) |
+
+CLI commands take precedence over the OpenAI API when both are set.
+
+**Whisper flow:** voice/audio message → dispatcher downloads OGG → runs Whisper →
+sends transcript as the message text to Claude (original audio still attached).
+
+**TTS flow:** Claude calls `send_voice` tool with text → dispatcher runs TTS →
+sends resulting OGG as a Telegram voice message in the topic.
+
+**Smart outbound media:** when Claude attaches files in `reply`, the dispatcher
+detects the file type and uses the appropriate Telegram method:
+- `.jpg`/`.png`/`.gif`/`.webp` → `sendPhoto` (inline image)
+- `.ogg`/`.opus` → `sendVoice` (inline audio player)
+- `.mp3`/`.m4a`/`.wav` → `sendAudio` (music player)
+- everything else → `sendDocument`
+
 ## Development
 
 ```bash
