@@ -956,9 +956,11 @@ func (d *Dispatcher) launchTmuxWithOpts(inst storage.Instance, resume bool) erro
 		}
 	}
 
-	// Resume the previous conversation by default. /reset starts fresh.
+	// Use a fixed session ID derived from the instance ID so Claude always
+	// resumes the same conversation for a given instance. /reset starts fresh
+	// by omitting this flag.
 	if resume {
-		claudeArgs += " --continue"
+		claudeArgs += " --session-id " + inst.InstanceID
 	}
 
 	cmd := fmt.Sprintf("%s %s", claudeBin, claudeArgs)
