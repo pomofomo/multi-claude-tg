@@ -44,8 +44,15 @@ func TestEnsureGitignoreAppendsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(gi)
-	if strings.Count(string(data), ".trd/") != 1 {
-		t.Errorf("want exactly one .trd/ entry, got:\n%s", data)
+	content := string(data)
+	if strings.Count(content, ".trd/") != 1 {
+		t.Errorf("want exactly one .trd/ entry, got:\n%s", content)
+	}
+	if strings.Count(content, ".mcp.json") != 1 {
+		t.Errorf("want exactly one .mcp.json entry, got:\n%s", content)
+	}
+	if strings.Count(content, ".omc/") != 1 {
+		t.Errorf("want exactly one .omc/ entry, got:\n%s", content)
 	}
 }
 
@@ -58,8 +65,11 @@ func TestEnsureGitignoreCreatesIfMissing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), ".trd/") {
-		t.Errorf("gitignore missing .trd/: %s", data)
+	content := string(data)
+	for _, entry := range []string{".trd/", ".mcp.json", ".omc/"} {
+		if !strings.Contains(content, entry) {
+			t.Errorf("gitignore missing %s: %s", entry, content)
+		}
 	}
 }
 
@@ -73,6 +83,6 @@ func TestEnsureGitignoreRecognizesBareTrd(t *testing.T) {
 	}
 	data, _ := os.ReadFile(filepath.Join(dir, ".gitignore"))
 	if strings.Count(string(data), ".trd") != 1 {
-		t.Errorf("should not re-append: %s", data)
+		t.Errorf("should not re-append .trd: %s", data)
 	}
 }

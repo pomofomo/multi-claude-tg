@@ -94,17 +94,33 @@ func ReadRepoConfig(repoPath string) (RepoConfig, error) {
 	return cfg, nil
 }
 
-// EnsureGitignore appends ".trd/" to <repoPath>/.gitignore if not already present.
-// Quiet no-op if .gitignore is unreadable (not worth failing the clone over).
+// EnsureGitignore appends TRD-specific entries to <repoPath>/.gitignore if not
+// already present: .trd/, .mcp.json, .omc/. These are per-instance files that
+// should not be committed to the repo.
 func EnsureGitignore(repoPath string) error {
 	path := filepath.Join(repoPath, ".gitignore")
 	var existing string
 	if data, err := os.ReadFile(path); err == nil {
 		existing = string(data)
 	}
-	if containsLine(existing, ".trd/") || containsLine(existing, ".trd") {
+
+	entries := []struct{ pattern, alt string }{
+		{".trd/", ".trd"},
+		{".mcp.json", ""},
+		{".omc/", ".omc"},
+	}
+
+	var toAdd []string
+	for _, e := range entries {
+		if containsLine(existing, e.pattern) || (e.alt != "" && containsLine(existing, e.alt)) {
+			continue
+		}
+		toAdd = append(toAdd, e.pattern)
+	}
+	if len(toAdd) == 0 {
 		return nil
 	}
+
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
@@ -114,7 +130,13 @@ func EnsureGitignore(repoPath string) error {
 	if len(existing) > 0 && existing[len(existing)-1] != '\n' {
 		prefix = "\n"
 	}
-	_, err = f.WriteString(prefix + ".trd/\n")
+	for _, entry := range toAdd {
+		_, err = f.WriteString(prefix + entry + "\n")
+		if err != nil {
+			return err
+		}
+		prefix = ""
+	}
 	return err
 }
 
