@@ -633,7 +633,7 @@ func (d *Dispatcher) cmdStart(ctx context.Context, m *telegram.Message, repoURL 
 		return
 	}
 
-	if err := d.launchTmux(inst); err != nil {
+	if err := d.launchTmuxFresh(inst); err != nil {
 		inst.State = storage.StateFailed
 		_ = d.store.Put(inst)
 		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "failed to launch tmux: "+err.Error())
@@ -940,9 +940,11 @@ func (d *Dispatcher) launchTmuxWithOpts(inst storage.Instance, resume bool) erro
 		return nil
 	}
 	cfgPath := filepath.Join(inst.RepoPath, ".trd", "config.json")
+	channelLog := filepath.Join(os.TempDir(), fmt.Sprintf("trd-channel-%s.log", shortID(inst.InstanceID)))
 	env := []string{
 		"TRD_CONFIG=" + cfgPath,
 		"TRD_INSTANCE_ID=" + inst.InstanceID,
+		"TRD_CHANNEL_LOG=" + channelLog,
 	}
 
 	claudeBin := firstNonEmpty(os.Getenv("TRD_CLAUDE_BIN"), "claude")
@@ -967,19 +969,14 @@ func (d *Dispatcher) launchTmuxWithOpts(inst storage.Instance, resume bool) erro
 		return err
 	}
 
-	// Auto-confirm the dev-channels prompt by detecting it in the pane
-	// instead of the old fragile sleep+send-keys approach.
-	keys := firstNonEmpty(os.Getenv("TRD_CLAUDE_CONFIRM_KEYS"), "Enter")
-	if keys != "" {
-		go d.autoConfirm(name, keys, inst.InstanceID)
-	}
+	// Auto-confirm the dev-channels prompt by detecting it in the pane.
+	go d.autoConfirm(name, inst.InstanceID)
 	return nil
 }
 
-// autoConfirm polls the tmux pane looking for a confirmation prompt and
-// sends keystrokes when it detects one. This replaces the old fragile
-// "sleep N; tmux send-keys Enter" shell workaround.
-func (d *Dispatcher) autoConfirm(sessionName, keys, instanceID string) {
+// autoConfirm polls the tmux pane looking for Claude Code's interactive
+// prompts (dev-channels warning, trust dialog) and sends Enter to dismiss.
+func (d *Dispatcher) autoConfirm(sessionName, instanceID string) {
 	const timeout = 30 * time.Second
 	const interval = 500 * time.Millisecond
 	deadline := time.Now().Add(timeout)
@@ -993,17 +990,17 @@ func (d *Dispatcher) autoConfirm(sessionName, keys, instanceID string) {
 		if err != nil {
 			continue
 		}
-		out = strings.TrimSpace(out)
-		if out == "" {
+		lower := strings.ToLower(strings.TrimSpace(out))
+		if lower == "" {
 			continue
 		}
-		// Look for a confirmation prompt on the last non-empty line.
-		lines := strings.Split(out, "\n")
-		last := strings.TrimSpace(lines[len(lines)-1])
-		if strings.Contains(last, "?") || strings.Contains(strings.ToLower(last), "y/n") {
-			d.logger.Info("autoConfirm: detected prompt, sending keys",
-				"instance", shortID(instanceID), "session", sessionName, "prompt", preview(last))
-			_ = tmuxmgr.SendKeys(sessionName, keys)
+		// Detect any interactive confirmation prompt.
+		if strings.Contains(lower, "enter to confirm") ||
+			strings.Contains(lower, "local development") ||
+			strings.Contains(lower, "y/n") {
+			d.logger.Info("autoConfirm: detected prompt, sending Enter",
+				"instance", shortID(instanceID), "session", sessionName)
+			_ = tmuxmgr.SendKeys(sessionName, "Enter")
 			return
 		}
 	}
