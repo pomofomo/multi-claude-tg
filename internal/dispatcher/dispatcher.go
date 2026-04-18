@@ -422,7 +422,7 @@ func (d *Dispatcher) pollLoop(ctx context.Context) error {
 		{Command: "status", Description: "Show tmux + channel connection state"},
 		{Command: "watch", Description: "Capture the current tmux pane"},
 		{Command: "model", Description: "Show or change model (sonnet, opus, haiku)"},
-		{Command: "effort", Description: "Show or change effort (low, medium, high, xhigh, max)"},
+		{Command: "effort", Description: "Show or change effort (low, medium, high, max, auto)"},
 		{Command: "debug", Description: "Toggle debug mode for new instances"},
 		{Command: "forget", Description: "Delete the topic-repo mapping"},
 		{Command: "help", Description: "Show available commands"},
@@ -729,7 +729,7 @@ func (d *Dispatcher) cmdHelp(ctx context.Context, m *telegram.Message) {
 /status — Show tmux + channel connection state
 /watch — Capture the current tmux pane
 /model [name] — Show or change Claude model (sonnet, opus, haiku)
-/effort [level] — Show or change effort (low, medium, high, xhigh, max)
+/effort [level] — Show or change effort (low, medium, high, max, auto)
 /debug — Toggle debug mode for new instances
 /forget — Delete the topic-repo mapping
 /help — Show this message
@@ -750,22 +750,13 @@ func (d *Dispatcher) cmdModel(ctx context.Context, m *telegram.Message, arg stri
 		return
 	}
 	if arg == "" {
-		// Show current — just capture the status line.
-		out, err := tmuxmgr.CapturePane(name)
-		if err != nil {
-			d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "capture failed: "+err.Error())
-			return
-		}
-		// Send /model to Claude to show current model.
 		_ = tmuxmgr.SendKeys(name, "/model", "Enter")
 		time.Sleep(1 * time.Second)
-		out, _ = tmuxmgr.CapturePane(name)
+		out, _ := tmuxmgr.CapturePane(name)
 		d.sendText(ctx, m.Chat.ID, m.MessageThreadID,
-			"Current model info:\n"+truncate(strings.TrimSpace(out), 2000)+
-				"\n\nTo change: /model sonnet, /model opus, /model haiku")
+			belowDivider(out)+"\n\nOptions: /model sonnet, /model opus, /model haiku")
 		return
 	}
-	// Validate and send the model change.
 	valid := map[string]bool{"sonnet": true, "opus": true, "haiku": true}
 	if !valid[strings.ToLower(arg)] {
 		d.sendText(ctx, m.Chat.ID, m.MessageThreadID,
@@ -773,7 +764,9 @@ func (d *Dispatcher) cmdModel(ctx context.Context, m *telegram.Message, arg stri
 		return
 	}
 	_ = tmuxmgr.SendKeys(name, "/model "+strings.ToLower(arg), "Enter")
-	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "Model changed to: "+strings.ToLower(arg))
+	time.Sleep(1 * time.Second)
+	out, _ := tmuxmgr.CapturePane(name)
+	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, belowDivider(out))
 }
 
 func (d *Dispatcher) cmdEffort(ctx context.Context, m *telegram.Message, arg string) {
@@ -792,18 +785,39 @@ func (d *Dispatcher) cmdEffort(ctx context.Context, m *telegram.Message, arg str
 		time.Sleep(1 * time.Second)
 		out, _ := tmuxmgr.CapturePane(name)
 		d.sendText(ctx, m.Chat.ID, m.MessageThreadID,
-			"Current effort info:\n"+truncate(strings.TrimSpace(out), 2000)+
-				"\n\nTo change: /effort low, /effort medium, /effort high, /effort xhigh, /effort max")
+			belowDivider(out)+"\n\nOptions: /effort low, /effort medium, /effort high, /effort max, /effort auto")
 		return
 	}
-	valid := map[string]bool{"low": true, "medium": true, "high": true, "xhigh": true, "max": true}
+	valid := map[string]bool{"low": true, "medium": true, "high": true, "max": true, "auto": true}
 	if !valid[strings.ToLower(arg)] {
 		d.sendText(ctx, m.Chat.ID, m.MessageThreadID,
-			"Unknown effort level. Options: low, medium, high, xhigh, max")
+			"Unknown effort level. Options: low, medium, high, max, auto")
 		return
 	}
 	_ = tmuxmgr.SendKeys(name, "/effort "+strings.ToLower(arg), "Enter")
-	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "Effort changed to: "+strings.ToLower(arg))
+	time.Sleep(1 * time.Second)
+	out, _ := tmuxmgr.CapturePane(name)
+	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, belowDivider(out))
+}
+
+// belowDivider extracts the content below the last ─── divider line in a
+// tmux pane capture, which is typically the status/result area in Claude Code.
+func belowDivider(pane string) string {
+	lines := strings.Split(pane, "\n")
+	lastDiv := -1
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if len(trimmed) > 3 && strings.Count(trimmed, "─") > len(trimmed)/2 {
+			lastDiv = i
+		}
+	}
+	if lastDiv >= 0 && lastDiv < len(lines)-1 {
+		result := strings.TrimSpace(strings.Join(lines[lastDiv+1:], "\n"))
+		if result != "" {
+			return result
+		}
+	}
+	return strings.TrimSpace(pane)
 }
 
 func (d *Dispatcher) cmdDebug(ctx context.Context, m *telegram.Message) {
