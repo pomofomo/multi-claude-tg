@@ -413,6 +413,21 @@ func (d *Dispatcher) pollLoop(ctx context.Context) error {
 	}
 	d.logger.Info("telegram bot online", "username", me.Username)
 
+	// Register bot commands for Telegram autocomplete.
+	if err := d.tg.SetMyCommands(ctx, []telegram.BotCommand{
+		{Command: "start", Description: "Clone a repo and launch Claude: /start <git-url>"},
+		{Command: "stop", Description: "Kill the Claude session (mapping kept)"},
+		{Command: "restart", Description: "Resume previous conversation"},
+		{Command: "reset", Description: "Start a fresh conversation"},
+		{Command: "status", Description: "Show tmux + channel connection state"},
+		{Command: "watch", Description: "Capture the current tmux pane"},
+		{Command: "debug", Description: "Toggle debug mode for new instances"},
+		{Command: "forget", Description: "Delete the topic-repo mapping"},
+		{Command: "help", Description: "Show available commands"},
+	}); err != nil {
+		d.logger.Warn("setMyCommands failed", "err", err)
+	}
+
 	offset := 0
 	for {
 		select {
@@ -514,6 +529,8 @@ func (d *Dispatcher) handleMessage(ctx context.Context, m *telegram.Message) {
 		d.cmdReset(ctx, m)
 	case text == "/debug":
 		d.cmdDebug(ctx, m)
+	case text == "/help":
+		d.cmdHelp(ctx, m)
 	default:
 		d.routeToInstance(ctx, m, text)
 	}
@@ -694,6 +711,23 @@ func (d *Dispatcher) cmdReset(ctx context.Context, m *telegram.Message) {
 	inst.FailCount = 0
 	_ = d.store.Put(*inst)
 	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "reset — fresh conversation started")
+}
+
+func (d *Dispatcher) cmdHelp(ctx context.Context, m *telegram.Message) {
+	help := `TRD — Telegram Repo Dispatcher
+
+/start <git-url> — Clone a repo and launch Claude
+/stop — Kill the Claude session (mapping kept)
+/restart — Resume previous conversation
+/reset — Start a fresh conversation (clears history)
+/status — Show tmux + channel connection state
+/watch — Capture the current tmux pane
+/debug — Toggle debug mode for new instances
+/forget — Delete the topic-repo mapping
+/help — Show this message
+
+Anything else you type is forwarded to Claude.`
+	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, help)
 }
 
 func (d *Dispatcher) cmdDebug(ctx context.Context, m *telegram.Message) {

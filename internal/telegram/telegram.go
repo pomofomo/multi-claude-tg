@@ -352,3 +352,17 @@ func (c *Client) DownloadFile(ctx context.Context, fileID, destDir string) (stri
 	}
 	return local, nil
 }
+
+// BotCommand represents a single bot command for the menu.
+type BotCommand struct {
+	Command     string `json:"command"`
+	Description string `json:"description"`
+}
+
+// SetMyCommands registers the bot's command list (shows in autocomplete).
+func (c *Client) SetMyCommands(ctx context.Context, commands []BotCommand) error {
+	_, err := doJSON[bool](ctx, c, "setMyCommands", map[string]any{
+		"commands": commands,
+	})
+	return err
+}
