@@ -421,6 +421,8 @@ func (d *Dispatcher) pollLoop(ctx context.Context) error {
 		{Command: "reset", Description: "Start a fresh conversation"},
 		{Command: "status", Description: "Show tmux + channel connection state"},
 		{Command: "watch", Description: "Capture the current tmux pane"},
+		{Command: "model", Description: "Show or change model (sonnet, opus, haiku)"},
+		{Command: "effort", Description: "Show or change effort (low, medium, high, xhigh, max)"},
 		{Command: "debug", Description: "Toggle debug mode for new instances"},
 		{Command: "forget", Description: "Delete the topic-repo mapping"},
 		{Command: "help", Description: "Show available commands"},
@@ -531,6 +533,10 @@ func (d *Dispatcher) handleMessage(ctx context.Context, m *telegram.Message) {
 		d.cmdDebug(ctx, m)
 	case text == "/help":
 		d.cmdHelp(ctx, m)
+	case text == "/model" || strings.HasPrefix(text, "/model "):
+		d.cmdModel(ctx, m, strings.TrimSpace(strings.TrimPrefix(text, "/model")))
+	case text == "/effort" || strings.HasPrefix(text, "/effort "):
+		d.cmdEffort(ctx, m, strings.TrimSpace(strings.TrimPrefix(text, "/effort")))
 	default:
 		d.routeToInstance(ctx, m, text)
 	}
@@ -722,12 +728,82 @@ func (d *Dispatcher) cmdHelp(ctx context.Context, m *telegram.Message) {
 /reset — Start a fresh conversation (clears history)
 /status — Show tmux + channel connection state
 /watch — Capture the current tmux pane
+/model [name] — Show or change Claude model (sonnet, opus, haiku)
+/effort [level] — Show or change effort (low, medium, high, xhigh, max)
 /debug — Toggle debug mode for new instances
 /forget — Delete the topic-repo mapping
 /help — Show this message
 
 Anything else you type is forwarded to Claude.`
 	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, help)
+}
+
+func (d *Dispatcher) cmdModel(ctx context.Context, m *telegram.Message, arg string) {
+	inst, _ := d.store.ByTopic(m.Chat.ID, m.MessageThreadID)
+	if inst == nil {
+		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "no instance bound to this topic")
+		return
+	}
+	name := tmuxmgr.SessionName(inst.InstanceID)
+	if !tmuxmgr.HasSession(name) {
+		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "tmux session not running")
+		return
+	}
+	if arg == "" {
+		// Show current — just capture the status line.
+		out, err := tmuxmgr.CapturePane(name)
+		if err != nil {
+			d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "capture failed: "+err.Error())
+			return
+		}
+		// Send /model to Claude to show current model.
+		_ = tmuxmgr.SendKeys(name, "/model", "Enter")
+		time.Sleep(1 * time.Second)
+		out, _ = tmuxmgr.CapturePane(name)
+		d.sendText(ctx, m.Chat.ID, m.MessageThreadID,
+			"Current model info:\n"+truncate(strings.TrimSpace(out), 2000)+
+				"\n\nTo change: /model sonnet, /model opus, /model haiku")
+		return
+	}
+	// Validate and send the model change.
+	valid := map[string]bool{"sonnet": true, "opus": true, "haiku": true}
+	if !valid[strings.ToLower(arg)] {
+		d.sendText(ctx, m.Chat.ID, m.MessageThreadID,
+			"Unknown model. Options: sonnet, opus, haiku")
+		return
+	}
+	_ = tmuxmgr.SendKeys(name, "/model "+strings.ToLower(arg), "Enter")
+	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "Model changed to: "+strings.ToLower(arg))
+}
+
+func (d *Dispatcher) cmdEffort(ctx context.Context, m *telegram.Message, arg string) {
+	inst, _ := d.store.ByTopic(m.Chat.ID, m.MessageThreadID)
+	if inst == nil {
+		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "no instance bound to this topic")
+		return
+	}
+	name := tmuxmgr.SessionName(inst.InstanceID)
+	if !tmuxmgr.HasSession(name) {
+		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "tmux session not running")
+		return
+	}
+	if arg == "" {
+		_ = tmuxmgr.SendKeys(name, "/effort", "Enter")
+		time.Sleep(1 * time.Second)
+		out, _ := tmuxmgr.CapturePane(name)
+		d.sendText(ctx, m.Chat.ID, m.MessageThreadID,
+			"Current effort info:\n"+truncate(strings.TrimSpace(out), 2000)+
+				"\n\nTo change: /effort low, /effort medium, /effort high, /effort xhigh, /effort max")
+		return
+	}
+	valid := map[string]bool{"low": true, "medium": true, "high": true, "xhigh": true, "max": true}
+	if !valid[strings.ToLower(arg)] {
+		d.sendText(ctx, m.Chat.ID, m.MessageThreadID,
+			"Unknown effort level. Options: low, medium, high, xhigh, max")
+		return
+	}
+	_ = tmuxmgr.SendKeys(name, "/effort "+strings.ToLower(arg), "Enter")
+	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "Effort changed to: "+strings.ToLower(arg))
 }
 
 func (d *Dispatcher) cmdDebug(ctx context.Context, m *telegram.Message) {
