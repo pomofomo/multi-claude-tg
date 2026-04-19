@@ -422,7 +422,7 @@ func (d *Dispatcher) pollLoop(ctx context.Context) error {
 		{Command: "status", Description: "Show tmux + channel connection state"},
 		{Command: "watch", Description: "Capture the current tmux pane"},
 		{Command: "model", Description: "Show or change model (sonnet, opus, haiku)"},
-		{Command: "effort", Description: "Show or change effort (low, medium, high, max, auto)"},
+		{Command: "effort", Description: "Show or change effort (low, medium, high, xhigh, max, auto)"},
 		{Command: "debug", Description: "Toggle debug mode for new instances"},
 		{Command: "forget", Description: "Delete the topic-repo mapping"},
 		{Command: "help", Description: "Show available commands"},
@@ -729,7 +729,7 @@ func (d *Dispatcher) cmdHelp(ctx context.Context, m *telegram.Message) {
 /status — Show tmux + channel connection state
 /watch — Capture the current tmux pane
 /model [name] — Show or change Claude model (sonnet, opus, haiku)
-/effort [level] — Show or change effort (low, medium, high, max, auto)
+/effort [level] — Show or change effort (low, medium, high, xhigh, max, auto)
 /debug — Toggle debug mode for new instances
 /forget — Delete the topic-repo mapping
 /help — Show this message
@@ -788,10 +788,10 @@ func (d *Dispatcher) cmdEffort(ctx context.Context, m *telegram.Message, arg str
 			extractPaneSection(out, "effort")+"\n\nOptions: /effort low, /effort medium, /effort high, /effort max, /effort auto")
 		return
 	}
-	valid := map[string]bool{"low": true, "medium": true, "high": true, "max": true, "auto": true}
+	valid := map[string]bool{"low": true, "medium": true, "high": true, "xhigh": true, "max": true, "auto": true}
 	if !valid[strings.ToLower(arg)] {
 		d.sendText(ctx, m.Chat.ID, m.MessageThreadID,
-			"Unknown effort level. Options: low, medium, high, max, auto")
+			"Unknown effort level. Options: low, medium, high, xhigh, max, auto")
 		return
 	}
 	_ = tmuxmgr.SendKeys(name, "/effort "+strings.ToLower(arg), "Enter")
