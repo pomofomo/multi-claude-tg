@@ -754,7 +754,7 @@ func (d *Dispatcher) cmdModel(ctx context.Context, m *telegram.Message, arg stri
 		time.Sleep(1 * time.Second)
 		out, _ := tmuxmgr.CapturePane(name)
 		d.sendText(ctx, m.Chat.ID, m.MessageThreadID,
-			belowDivider(out)+"\n\nOptions: /model sonnet, /model opus, /model haiku")
+			extractPaneSection(out, "model")+"\n\nOptions: /model sonnet, /model opus, /model haiku")
 		return
 	}
 	valid := map[string]bool{"sonnet": true, "opus": true, "haiku": true}
@@ -766,7 +766,7 @@ func (d *Dispatcher) cmdModel(ctx context.Context, m *telegram.Message, arg stri
 	_ = tmuxmgr.SendKeys(name, "/model "+strings.ToLower(arg), "Enter")
 	time.Sleep(1 * time.Second)
 	out, _ := tmuxmgr.CapturePane(name)
-	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, belowDivider(out))
+	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, extractPaneSection(out, "model"))
 }
 
 func (d *Dispatcher) cmdEffort(ctx context.Context, m *telegram.Message, arg string) {
@@ -785,7 +785,7 @@ func (d *Dispatcher) cmdEffort(ctx context.Context, m *telegram.Message, arg str
 		time.Sleep(1 * time.Second)
 		out, _ := tmuxmgr.CapturePane(name)
 		d.sendText(ctx, m.Chat.ID, m.MessageThreadID,
-			belowDivider(out)+"\n\nOptions: /effort low, /effort medium, /effort high, /effort max, /effort auto")
+			extractPaneSection(out, "effort")+"\n\nOptions: /effort low, /effort medium, /effort high, /effort max, /effort auto")
 		return
 	}
 	valid := map[string]bool{"low": true, "medium": true, "high": true, "max": true, "auto": true}
@@ -797,13 +797,65 @@ func (d *Dispatcher) cmdEffort(ctx context.Context, m *telegram.Message, arg str
 	_ = tmuxmgr.SendKeys(name, "/effort "+strings.ToLower(arg), "Enter")
 	time.Sleep(1 * time.Second)
 	out, _ := tmuxmgr.CapturePane(name)
-	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, belowDivider(out))
+	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, extractPaneSection(out, "effort"))
 }
 
-// belowDivider extracts the content below the last ─── divider line in a
-// tmux pane capture, which is typically the status/result area in Claude Code.
-func belowDivider(pane string) string {
+// extractPaneSection extracts a meaningful section from a tmux pane capture.
+// For /model output: everything from "select model" up to the first blank line after.
+// For /effort output: everything up to "debug mode".
+// Falls back to content below the last ─── divider, then the full pane.
+func extractPaneSection(pane, hint string) string {
 	lines := strings.Split(pane, "\n")
+	lower := strings.ToLower(hint)
+
+	if lower == "model" {
+		// Find "select model" and grab until next blank line.
+		start := -1
+		for i, line := range lines {
+			if strings.Contains(strings.ToLower(line), "select model") {
+				start = i
+				break
+			}
+		}
+		if start >= 0 {
+			var result []string
+			for _, line := range lines[start:] {
+				trimmed := strings.TrimSpace(line)
+				if len(result) > 0 && trimmed == "" {
+					break
+				}
+				result = append(result, trimmed)
+			}
+			if len(result) > 0 {
+				return strings.Join(result, "\n")
+			}
+		}
+	}
+
+	if lower == "effort" {
+		// Grab content and cut at "debug mode".
+		var result []string
+		capture := false
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.Contains(strings.ToLower(trimmed), "effort") && !capture {
+				capture = true
+			}
+			if capture {
+				if strings.Contains(strings.ToLower(trimmed), "debug mode") {
+					break
+				}
+				if trimmed != "" {
+					result = append(result, trimmed)
+				}
+			}
+		}
+		if len(result) > 0 {
+			return strings.Join(result, "\n")
+		}
+	}
+
+	// Fallback: content below last divider.
 	lastDiv := -1
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
