@@ -194,16 +194,23 @@ func (d *Dispatcher) OnOutbound(instanceID string, frame ws.Frame) {
 			"files", len(frame.Files),
 		)
 		if frame.Text != "" {
-			sent, err := d.tg.SendMessage(ctx, telegram.SendMessageParams{
-				ChatID:           chatID,
-				MessageThreadID:  threadID,
-				Text:             frame.Text,
-				ReplyToMessageID: frame.ReplyTo,
-			})
-			if err != nil {
-				d.logger.Warn("tg sendMessage failed", "instance", shortID(instanceID), "err", err)
-			} else {
-				d.logger.Info("tg sendMessage ok", "instance", shortID(instanceID), "msg_id", sent.MessageID)
+			// Telegram has a 4096 char limit. Split long messages.
+			for i, chunk := range splitMessage(frame.Text, 4000) {
+				replyTo := 0
+				if i == 0 {
+					replyTo = frame.ReplyTo
+				}
+				sent, err := d.tg.SendMessage(ctx, telegram.SendMessageParams{
+					ChatID:           chatID,
+					MessageThreadID:  threadID,
+					Text:             chunk,
+					ReplyToMessageID: replyTo,
+				})
+				if err != nil {
+					d.logger.Warn("tg sendMessage failed", "instance", shortID(instanceID), "err", err, "chunk", i)
+				} else {
+					d.logger.Info("tg sendMessage ok", "instance", shortID(instanceID), "msg_id", sent.MessageID, "chunk", i)
+				}
 			}
 		}
 		for _, path := range frame.Files {
@@ -798,6 +805,29 @@ func (d *Dispatcher) cmdEffort(ctx context.Context, m *telegram.Message, arg str
 	time.Sleep(1 * time.Second)
 	out, _ := tmuxmgr.CapturePane(name)
 	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, extractPaneSection(out, "effort"))
+}
+
+// splitMessage breaks a long text into chunks of at most maxLen characters,
+// splitting at newline boundaries when possible.
+func splitMessage(text string, maxLen int) []string {
+	if len(text) <= maxLen {
+		return []string{text}
+	}
+	var chunks []string
+	for len(text) > 0 {
+		if len(text) <= maxLen {
+			chunks = append(chunks, text)
+			break
+		}
+		// Find the last newline within maxLen.
+		cut := maxLen
+		if idx := strings.LastIndex(text[:maxLen], "\n"); idx > maxLen/2 {
+			cut = idx + 1
+		}
+		chunks = append(chunks, text[:cut])
+		text = text[cut:]
+	}
+	return chunks
 }
 
 // extractPaneSection extracts a meaningful section from a tmux pane capture.
