@@ -1,120 +1,102 @@
 # Manager Session Design
 
-A manager session is a Claude instance that can orchestrate work across other TRD-managed repos. Instead of you manually switching between topics to coordinate, you talk to one "manager" topic and it delegates tasks to other instances, collects results, and reports progress back to you.
+A manager session is a Claude instance promoted with `/manager` that can orchestrate work across other TRD-managed repos. Instead of manually switching between topics, you talk to one "manager" topic and it delegates tasks to other instances, collects results, and reports progress.
 
-## Concept
+## Decisions
 
-```
-You (Telegram)
-  └── Topic: manager
-        └── Claude (manager session)
-              ├── delegates to: Topic: backend (via TRD API)
-              ├── delegates to: Topic: frontend (via TRD API)
-              └── delegates to: Topic: infra (via TRD API)
-                    ↓
-              collects results, synthesizes, reports back to you
-```
+| Question | Decision |
+|----------|----------|
+| Who can delegate? | Only `/manager`-promoted instances |
+| Repo-less managers? | No — every manager must have a repo attached |
+| Can managers /start new instances? | No — future work |
+| Permission scoping (manager → subset)? | No — future work. Any manager can delegate to any instance |
 
-Today, each Claude instance is isolated — it only sees messages in its own topic. A manager session breaks this isolation by giving Claude tools to:
+## Architecture: WS bridge through dispatcher
 
-1. **Send tasks to other instances** — "go implement X in the backend repo"
-2. **Read responses from other instances** — poll or subscribe for their replies
-3. **Report progress** — stream status updates to the manager topic as work proceeds
-
-## How it could work
-
-### Option A: Manager tools via the channel plugin
-
-Add new MCP tools to the channel plugin that the manager Claude can call:
+Delegation flows through the dispatcher's existing WebSocket connections, not through Telegram. Telegram is used for user visibility only.
 
 ```
-delegate(instance_name, message)     → sends a message to another instance's topic
-poll(instance_name, since_msg_id)    → reads recent messages from another instance's topic
-list_instances()                     → shows all running instances and their state
+Manager Claude
+  → calls delegate(instance, message) tool
+  → channel plugin sends WS frame {type: "delegate", target: "backend", text: "..."}
+  → dispatcher receives frame
+  → dispatcher forwards as a message frame to target instance's WS connection
+  → dispatcher posts task to target's Telegram topic (user visibility)
+  → target Claude processes the message, replies
+  → dispatcher captures the reply
+  → dispatcher sends {type: "delegate_result", req_id: "...", text: "..."} back to manager
+  → dispatcher posts reply to target's Telegram topic (user visibility)
+  → manager Claude receives the result, synthesizes, reports to user
 ```
 
-Under the hood, these tools talk to the dispatcher's existing API (`/api/instances`) and Telegram API (send message to another topic, read messages).
+**Why WS, not Telegram round-trip:** Faster, richer data (no Telegram formatting limits), and the dispatcher already has live WS connections to all instances. Telegram posts are a side effect for user visibility, not the transport.
 
-**Pros:** Minimal changes. Reuses existing infrastructure.
-**Cons:** The manager reads/writes via Telegram, which means it sees Telegram-formatted messages (not raw Claude output). Latency of Telegram round-trip.
-
-### Option B: Direct WS bridge between instances
-
-The dispatcher creates a direct message channel between the manager instance and target instances, bypassing Telegram entirely:
+## Promoting a manager
 
 ```
-Manager Claude → channel plugin → WS → dispatcher → WS → Target channel plugin → Target Claude
-                                                      ↓
-                                              (also posts to Telegram for user visibility)
+/manager        — toggle manager mode for this topic's instance
 ```
 
-New frame types: `delegate`, `delegate_result`, `delegate_status`.
+When promoted:
+- Dispatcher sets a `Manager` flag on the Instance in bbolt
+- On next channel plugin connection, the dispatcher tells the plugin to expose extra tools
+- The channel plugin adds `delegate`, `broadcast`, `poll_instance`, `list_instances` tools
 
-**Pros:** Lower latency, richer data (not limited to Telegram formatting).
-**Cons:** More complex. Target Claude needs to handle delegate frames differently from user messages.
+When demoted (toggle off):
+- Flag cleared, extra tools removed on next reconnect
 
-### Option C: Dispatcher-level orchestration
-
-The dispatcher itself becomes the orchestrator. The manager Claude sends a high-level task description, and the dispatcher manages the multi-instance coordination:
-
-```
-Manager Claude: "Deploy the new auth service: update backend, frontend, and infra"
-  → Dispatcher breaks this into per-instance messages
-  → Sends to each instance's topic
-  → Collects replies
-  → Forwards consolidated result to manager
-```
-
-**Pros:** Manager Claude doesn't need to manage coordination details.
-**Cons:** Dispatcher becomes much more complex. Hard to handle nuanced multi-step tasks.
-
-### Recommendation: Option A for v1
-
-Start with Option A — it's the simplest and leverages everything we already have. The manager Claude gets tools to send messages to other topics and read their responses. It handles the orchestration logic itself (Claude is good at this). We post everything to Telegram so the user sees all progress.
-
-## Proposed tools for the manager
+## Tools
 
 ### `delegate`
 
-Send a task to another instance.
+Send a task to another instance and wait for the response.
 
 ```json
 {
   "name": "delegate",
   "arguments": {
     "instance": "backend",
-    "message": "Add rate limiting to the /api/users endpoint",
-    "wait": true
+    "message": "Add rate limiting to the /api/users endpoint"
   }
 }
 ```
 
-- `instance`: repo name or instance ID prefix
+- `instance`: repo name or instance ID prefix (same matching as CLI)
 - `message`: the task to send
-- `wait`: if true, block until a response comes back (with timeout)
 - Returns: the target instance's reply text
+- Timeout: 5 minutes (configurable). Returns error on timeout or if target is offline.
 
-Under the hood: dispatcher sends a Telegram message to the target topic on behalf of the manager, waits for the reply, returns it.
+Under the hood:
+1. Channel plugin sends `delegate` frame to dispatcher
+2. Dispatcher resolves instance name → instance_id
+3. Dispatcher injects a message frame into the target's WS channel
+4. Dispatcher also sends the task to the target's Telegram topic (prefixed "📋 [manager-name]:")
+5. Dispatcher subscribes to the target's next outbound reply frame
+6. When target replies, dispatcher captures the reply text
+7. Dispatcher sends `delegate_result` frame back to manager
+8. Dispatcher also posts the reply to the target's Telegram topic (normal)
 
 ### `broadcast`
 
-Send the same message to multiple instances.
+Send the same message to multiple instances in parallel.
 
 ```json
 {
   "name": "broadcast",
   "arguments": {
-    "instances": ["backend", "frontend"],
+    "instances": ["backend", "frontend", "infra"],
     "message": "What's your current git branch and latest commit?"
   }
 }
 ```
 
-Returns: map of instance → response.
+Returns: JSON map of instance name → response text.
+
+Under the hood: parallel delegates with a shared timeout.
 
 ### `poll_instance`
 
-Read recent activity from another instance's topic without sending a message.
+Read recent activity from another instance without sending a message.
 
 ```json
 {
@@ -126,11 +108,11 @@ Read recent activity from another instance's topic without sending a message.
 }
 ```
 
-Returns: last N messages from that topic (both user and Claude messages).
+Returns: last N message frames that passed through the dispatcher for that instance (both inbound and outbound). The dispatcher keeps a small ring buffer per instance.
 
 ### `list_instances`
 
-Already exists as an API endpoint. Expose as a tool.
+List all running instances and their state.
 
 ```json
 {
@@ -139,55 +121,50 @@ Already exists as an API endpoint. Expose as a tool.
 }
 ```
 
-Returns: all instances with name, state, tmux, channel status.
+Returns: all instances with name, state, tmux alive, channel connected, repo URL.
 
-## Designating a manager session
+## WS frame types
 
-Options:
-1. **Any instance can manage** — all instances get the delegate tools. Simple but noisy.
-2. **Explicit /manager command** — send `/manager` in a topic to promote it. Only manager instances get the extra tools.
-3. **Dedicated manager instance** — a special instance with no repo, just orchestration tools.
+New frame types added to `ws.Frame`:
 
-Recommendation: Option 2. Any instance can be promoted to manager with `/manager`. The dispatcher adds the delegate tools to that instance's channel plugin capabilities. Multiple managers are fine.
+| Frame | Direction | Fields |
+|-------|-----------|--------|
+| `delegate` | plugin → server | `target` (instance name), `text`, `req_id` |
+| `delegate_result` | server → plugin | `req_id`, `text`, `error` |
+| `delegate_status` | server → plugin | `req_id`, `status` (e.g. "sent", "processing", "timeout") |
 
 ## Progress visibility
 
-When the manager delegates a task:
-1. The task message appears in the target topic (user can see it)
-2. The target Claude's replies appear in the target topic (user can see them)
-3. The manager gets the reply back via the tool return value
-4. The manager synthesizes and reports to its own topic
+Everything is visible to the user in Telegram:
 
-This means the user sees everything in Telegram — individual topic activity plus the manager's summary. No hidden work.
+1. **Target topic** shows the delegated task (prefixed with manager name) and the target Claude's reply
+2. **Manager topic** shows the manager's synthesis after collecting results
+3. No hidden work — if you open any topic, you see what happened
 
-## Implementation sketch
+## Implementation plan
 
-### Phase 1: delegate + list_instances tools
-- Add `delegate` tool to channel plugin
-- Dispatcher handles `delegate` frame type:
-  - Sends message to target instance's topic via Telegram
-  - Waits for next Claude reply in that topic (subscribe to updates)
-  - Returns reply text to the manager
-- Add `list_instances` tool (calls existing API)
+### Phase 1: Core delegation (MVP)
+- [ ] Add `Manager` bool to Instance struct in bbolt
+- [ ] Add `/manager` Telegram command to toggle
+- [ ] Add `delegate` and `delegate_result` frame types to `ws.Frame`
+- [ ] Dispatcher: handle `delegate` frame — route to target, wait for reply, return result
+- [ ] Channel plugin: add `delegate` and `list_instances` tools (conditional on manager flag)
+- [ ] Telegram: post delegated tasks with 📋 prefix for visibility
+- [ ] Per-instance message ring buffer in dispatcher (for poll_instance)
 
-### Phase 2: poll + broadcast
-- Add `poll_instance` tool (reads recent Telegram messages from a topic)
-- Add `broadcast` tool (parallel delegate to multiple instances)
+### Phase 2: Broadcast + poll
+- [ ] Add `broadcast` tool (parallel delegates)
+- [ ] Add `poll_instance` tool (read from ring buffer)
+- [ ] Add `delegate_status` frame for progress updates
 
 ### Phase 3: Streaming progress
-- Manager can subscribe to a target instance's replies in real-time
-- Progress updates stream to the manager topic as they happen
+- [ ] Manager subscribes to target instance's reply stream
+- [ ] Progress updates forwarded to manager topic in real-time
 
-## Open questions
+## Future work (post-MVP)
 
-1. **How does the manager wait for a response?** The delegate tool blocks until the target Claude replies. But what's the timeout? What if the target hits a rate limit?
-
-2. **Should delegate messages look different in Telegram?** e.g., "🤖 Manager: Add rate limiting..." to distinguish from human messages.
-
-3. **Can a manager delegate to itself?** Probably no — that's just normal conversation.
-
-4. **What about task cancellation?** If the user sends `/stop` to a target while the manager is waiting for a response, the delegate tool should return an error.
-
-5. **Authentication/authorization:** Should any instance be able to delegate to any other? Or should there be an explicit trust relationship?
-
-6. **Repo-less manager:** Would you want a manager session that doesn't have its own repo checkout — just a pure orchestration point? Or always tied to a repo?
+- **Manager can /start new instances** — "clone this repo and do X" in one step
+- **Permission scoping** — manager can only delegate to a configured subset of instances
+- **Task queuing** — if target is busy, queue the delegate and notify when it's picked up
+- **Multi-step workflows** — manager defines a DAG of tasks across instances
+- **Manager-to-manager delegation** — hierarchical orchestration
