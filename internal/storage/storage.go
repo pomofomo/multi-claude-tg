@@ -39,6 +39,7 @@ type Instance struct {
 	Secret      string    `json:"secret"`
 	State       State     `json:"state"`
 	FailCount   int       `json:"fail_count"`
+	Manager     bool      `json:"manager"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }

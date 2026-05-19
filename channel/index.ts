@@ -62,10 +62,24 @@ type TTSResultFrame = {
   error?: string;
 };
 
+type DelegateResultFrame = {
+  type: "delegate_result";
+  req_id: string;
+  text?: string;
+  error?: string;
+};
+
+type ConfigFrame = {
+  type: "config";
+  manager?: boolean;
+};
+
 type AnyInbound =
   | InboundFrame
   | DownloadResultFrame
   | TTSResultFrame
+  | DelegateResultFrame
+  | ConfigFrame
   | { type: string; [k: string]: unknown };
 
 const CONFIG_PATH = process.env.TRD_CONFIG ?? process.env.CLAUDE_TRD_CONFIG;
@@ -97,8 +111,10 @@ log("boot", { instance_id: cfg.instance_id, dispatcher_port: cfg.dispatcher_port
 
 let ws: WebSocket | null = null;
 let backoffMs = 500;
+let isManager = false;
 const pendingDownloads = new Map<string, (f: DownloadResultFrame) => void>();
 const pendingTTS = new Map<string, (f: TTSResultFrame) => void>();
+const pendingDelegates = new Map<string, (f: DelegateResultFrame) => void>();
 
 // Gate: don't forward frames until the MCP handshake (tools/list) completes.
 let ready = false;
@@ -232,6 +248,23 @@ function onFrame(frame: AnyInbound): void {
     }
     return;
   }
+  if (frame.type === "delegate_result") {
+    const r = frame as DelegateResultFrame;
+    const cb = pendingDelegates.get(r.req_id);
+    if (cb) {
+      pendingDelegates.delete(r.req_id);
+      cb(r);
+    }
+    return;
+  }
+  if (frame.type === "config") {
+    const c = frame as ConfigFrame;
+    if (c.manager !== undefined) {
+      isManager = c.manager;
+      log("config: manager mode", { isManager });
+    }
+    return;
+  }
   log("unknown frame type", { type: frame.type });
 }
 
@@ -316,6 +349,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         required: ["text"],
       },
     },
+    // Manager-only tools: delegate work to other instances.
+    ...(isManager ? [
+      {
+        name: "delegate",
+        description:
+          "Send a task to another TRD-managed Claude instance and wait for its response. " +
+          "Only available when this instance is promoted to manager (/manager).",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            instance: { type: "string", description: "Target instance repo name or ID prefix" },
+            message: { type: "string", description: "The task to send to the target instance" },
+          },
+          required: ["instance", "message"],
+        },
+      },
+      {
+        name: "list_instances",
+        description: "List all TRD-managed instances and their current state.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {},
+        },
+      },
+    ] : []),
   ],
 }; });
 
@@ -394,6 +452,42 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         };
       }
       return { content: [{ type: "text", text: `voice message sent` }] };
+    }
+    case "delegate": {
+      if (!isManager) {
+        return { isError: true, content: [{ type: "text", text: "delegate requires manager mode (/manager)" }] };
+      }
+      const reqId = `del-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const instance = String(a.instance ?? "");
+      const message = String(a.message ?? "");
+      const result = await new Promise<DelegateResultFrame>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingDelegates.delete(reqId);
+          reject(new Error("delegate timed out after 5 minutes"));
+        }, 5 * 60_000);
+        pendingDelegates.set(reqId, (f) => {
+          clearTimeout(timer);
+          resolve(f);
+        });
+        wsSend({ type: "delegate", target: instance, text: message, req_id: reqId });
+      });
+      if (result.error) {
+        return { isError: true, content: [{ type: "text", text: `delegate failed: ${result.error}` }] };
+      }
+      return { content: [{ type: "text", text: result.text ?? "(empty response)" }] };
+    }
+    case "list_instances": {
+      // Fetch from the dispatcher's HTTP API.
+      try {
+        const resp = await fetch(`http://127.0.0.1:${cfg.dispatcher_port}/api/instances`);
+        const data = await resp.json();
+        const lines = (data as Array<{ repo_name: string; instance_id: string; state: string; connected: boolean; tmux_alive: boolean; manager: boolean }>)
+          .map((i) => `${i.repo_name || "?"} (${i.instance_id.slice(0, 8)}) state=${i.state} tmux=${i.tmux_alive} channel=${i.connected}${i.manager ? " MANAGER" : ""}`)
+          .join("\n");
+        return { content: [{ type: "text", text: lines || "no instances" }] };
+      } catch (e) {
+        return { isError: true, content: [{ type: "text", text: `list_instances failed: ${e}` }] };
+      }
     }
     default:
       return {

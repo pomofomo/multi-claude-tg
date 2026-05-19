@@ -62,6 +62,11 @@ type Dispatcher struct {
 	// only notify once and can detect recovery.
 	rateLimitedMu sync.Mutex
 	rateLimited   map[string]bool
+
+	// pendingDelegates tracks delegate requests waiting for a reply from
+	// the target instance. Keyed by target instance_id.
+	delegateMu       sync.Mutex
+	pendingDelegates map[string]chan string
 }
 
 type liveConn struct {
@@ -123,9 +128,10 @@ func New(opts Options) (*Dispatcher, error) {
 		tg:      telegram.New(opts.TelegramToken),
 		store:   store,
 		media:   engine,
-		conns:       map[string]*liveConn{},
-		pending:     map[string]chan ws.Frame{},
-		rateLimited: map[string]bool{},
+		conns:            map[string]*liveConn{},
+		pending:          map[string]chan ws.Frame{},
+		rateLimited:      map[string]bool{},
+		pendingDelegates: map[string]chan string{},
 	}
 	d.server = ws.New(fmt.Sprintf("127.0.0.1:%d", opts.Port), opts.Logger, d)
 	return d, nil
@@ -159,6 +165,11 @@ func (d *Dispatcher) Register(instanceID string, conn *ws.Conn) <-chan ws.Frame 
 	d.conns[instanceID] = &liveConn{conn: conn, inbound: ch}
 	d.mu.Unlock()
 	d.logger.Info("channel connected", "instance", instanceID)
+	// Tell the channel plugin whether this instance is a manager.
+	inst, _ := d.store.Get(instanceID)
+	if inst != nil && inst.Manager {
+		ch <- ws.Frame{Type: "config", Manager: true}
+	}
 	return ch
 }
 
@@ -193,6 +204,18 @@ func (d *Dispatcher) OnOutbound(instanceID string, frame ws.Frame) {
 			"text_len", len(frame.Text), "text", preview(frame.Text),
 			"files", len(frame.Files),
 		)
+		// If a manager is waiting for a delegate response from this instance,
+		// forward the reply text to the waiting channel.
+		d.delegateMu.Lock()
+		if ch, ok := d.pendingDelegates[instanceID]; ok {
+			select {
+			case ch <- frame.Text:
+			default:
+			}
+			delete(d.pendingDelegates, instanceID)
+		}
+		d.delegateMu.Unlock()
+
 		if frame.Text != "" {
 			// Telegram has a 4096 char limit. Split long messages.
 			for i, chunk := range splitMessage(frame.Text, 4000) {
@@ -218,6 +241,8 @@ func (d *Dispatcher) OnOutbound(instanceID string, frame ws.Frame) {
 				d.logger.Warn("tg send file failed", "instance", shortID(instanceID), "path", path, "err", err)
 			}
 		}
+	case "delegate":
+		d.handleDelegate(instanceID, frame)
 	case "react":
 		d.logger.Info("claude->tg react",
 			"instance", shortID(instanceID),
@@ -333,6 +358,113 @@ func (d *Dispatcher) ListInstances() ([]byte, error) {
 	return json.Marshal(infos)
 }
 
+// handleDelegate processes a delegate frame from a manager instance. It finds
+// the target instance, injects the message, waits for a reply, and sends the
+// result back to the manager.
+func (d *Dispatcher) handleDelegate(managerID string, frame ws.Frame) {
+	d.logger.Info("delegate",
+		"manager", shortID(managerID), "target", frame.Target,
+		"text_len", len(frame.Text), "req_id", frame.ReqID,
+	)
+
+	// Resolve target instance by name or ID prefix.
+	target, err := d.findInstance(frame.Target)
+	if err != nil {
+		d.sendTo(managerID, ws.Frame{
+			Type: "delegate_result", ReqID: frame.ReqID,
+			Err: "target not found: " + err.Error(),
+		})
+		return
+	}
+
+	// Check target is running and connected.
+	d.mu.RLock()
+	_, connected := d.conns[target.InstanceID]
+	d.mu.RUnlock()
+	if !connected {
+		d.sendTo(managerID, ws.Frame{
+			Type: "delegate_result", ReqID: frame.ReqID,
+			Err: fmt.Sprintf("target %q not connected (channel=%v)", target.RepoName, false),
+		})
+		return
+	}
+
+	// Set up a channel to receive the reply.
+	replyCh := make(chan string, 1)
+	d.delegateMu.Lock()
+	d.pendingDelegates[target.InstanceID] = replyCh
+	d.delegateMu.Unlock()
+
+	// Post the task to the target's Telegram topic for visibility.
+	managerInst, _ := d.store.Get(managerID)
+	managerName := "manager"
+	if managerInst != nil {
+		managerName = managerInst.RepoName
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	d.sendText(ctx, target.ChatID, target.TopicID,
+		fmt.Sprintf("📋 [%s]: %s", managerName, frame.Text))
+
+	// Inject the message into the target's WS channel.
+	d.sendTo(target.InstanceID, ws.Frame{
+		Type:   "message",
+		ChatID: target.ChatID,
+		User:   "manager:" + managerName,
+		Text:   frame.Text,
+	})
+
+	// Wait for the reply or timeout.
+	select {
+	case reply := <-replyCh:
+		d.sendTo(managerID, ws.Frame{
+			Type:  "delegate_result",
+			ReqID: frame.ReqID,
+			Text:  reply,
+		})
+	case <-ctx.Done():
+		d.delegateMu.Lock()
+		delete(d.pendingDelegates, target.InstanceID)
+		d.delegateMu.Unlock()
+		d.sendTo(managerID, ws.Frame{
+			Type: "delegate_result", ReqID: frame.ReqID,
+			Err: "delegate timed out (5m)",
+		})
+	}
+}
+
+// findInstance resolves an instance by repo name or ID prefix.
+func (d *Dispatcher) findInstance(query string) (*storage.Instance, error) {
+	all, err := d.store.All()
+	if err != nil {
+		return nil, err
+	}
+	// Match by repo name first.
+	var byName []storage.Instance
+	for _, inst := range all {
+		name := inst.RepoName
+		if name == "" {
+			name = storage.RepoNameFromURL(inst.RepoURL)
+		}
+		if strings.EqualFold(name, query) || strings.HasPrefix(strings.ToLower(name), strings.ToLower(query)) {
+			byName = append(byName, inst)
+		}
+	}
+	if len(byName) == 1 {
+		return &byName[0], nil
+	}
+	if len(byName) > 1 {
+		return nil, fmt.Errorf("%d instances match %q", len(byName), query)
+	}
+	// Match by ID prefix.
+	for _, inst := range all {
+		if strings.HasPrefix(inst.InstanceID, query) {
+			return &inst, nil
+		}
+	}
+	return nil, fmt.Errorf("no instance matching %q", query)
+}
+
 // isUserAllowed checks a Telegram username against the combined allowlist
 // (stored users + TRD_ALLOWED_USERNAMES env var). An empty combined list
 // means everyone is allowed (backwards compatible).
@@ -428,6 +560,7 @@ func (d *Dispatcher) pollLoop(ctx context.Context) error {
 		{Command: "reset", Description: "Start a fresh conversation"},
 		{Command: "status", Description: "Show tmux + channel connection state"},
 		{Command: "watch", Description: "Capture the current tmux pane"},
+		{Command: "manager", Description: "Toggle manager mode (delegate to other instances)"},
 		{Command: "model", Description: "Show or change model (sonnet, opus, haiku)"},
 		{Command: "effort", Description: "Show or change effort (low, medium, high, xhigh, max, auto)"},
 		{Command: "debug", Description: "Toggle debug mode for new instances"},
@@ -540,6 +673,8 @@ func (d *Dispatcher) handleMessage(ctx context.Context, m *telegram.Message) {
 		d.cmdDebug(ctx, m)
 	case text == "/help":
 		d.cmdHelp(ctx, m)
+	case text == "/manager":
+		d.cmdManager(ctx, m)
 	case text == "/model" || strings.HasPrefix(text, "/model "):
 		d.cmdModel(ctx, m, strings.TrimSpace(strings.TrimPrefix(text, "/model")))
 	case text == "/effort" || strings.HasPrefix(text, "/effort "):
@@ -726,6 +861,23 @@ func (d *Dispatcher) cmdReset(ctx context.Context, m *telegram.Message) {
 	d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "reset — fresh conversation started")
 }
 
+func (d *Dispatcher) cmdManager(ctx context.Context, m *telegram.Message) {
+	inst, _ := d.store.ByTopic(m.Chat.ID, m.MessageThreadID)
+	if inst == nil {
+		d.sendText(ctx, m.Chat.ID, m.MessageThreadID, "no instance bound to this topic")
+		return
+	}
+	inst.Manager = !inst.Manager
+	_ = d.store.Put(*inst)
+	state := "OFF"
+	if inst.Manager {
+		state = "ON"
+	}
+	d.logger.Info("manager mode toggled", "instance", shortID(inst.InstanceID), "manager", inst.Manager)
+	d.sendText(ctx, m.Chat.ID, m.MessageThreadID,
+		fmt.Sprintf("Manager mode: %s. Use /restart to reload with delegate tools.", state))
+}
+
 func (d *Dispatcher) cmdHelp(ctx context.Context, m *telegram.Message) {
 	help := `TRD — Telegram Repo Dispatcher
 
@@ -737,6 +889,7 @@ func (d *Dispatcher) cmdHelp(ctx context.Context, m *telegram.Message) {
 /watch — Capture the current tmux pane
 /model [name] — Show or change Claude model (sonnet, opus, haiku)
 /effort [level] — Show or change effort (low, medium, high, xhigh, max, auto)
+/manager — Toggle manager mode (enables delegate tools)
 /debug — Toggle debug mode for new instances
 /forget — Delete the topic-repo mapping
 /help — Show this message

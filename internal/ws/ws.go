@@ -66,6 +66,9 @@ type Frame struct {
 	AttachmentFileID string `json:"attachment_file_id,omitempty"`
 	AttachmentName   string `json:"attachment_name,omitempty"`
 	InstanceID string `json:"instance_id,omitempty"`
+	// Manager delegation fields.
+	Target  string `json:"target,omitempty"`  // delegate: target instance name
+	Manager bool   `json:"manager,omitempty"` // hello response: manager flag
 }
 
 // Conn wraps a live WebSocket and serializes writes.
